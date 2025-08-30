@@ -1,22 +1,77 @@
 import os
 import sqlite3
-from typing import Tuple, Any, List, Optional
+from typing import Tuple, Any, List, Optional, Dict
 
 import pandas as pd
 import numpy as np
+try:
+    from sqlalchemy import create_engine, text
+except Exception:  # sqlalchemy is optional locally
+    create_engine = None  # type: ignore
+    text = None  # type: ignore
 
 
 DB_PATH_DEFAULT = os.path.join("data", "gastos.db")
 
 
-def get_conn(db_path: str = DB_PATH_DEFAULT) -> sqlite3.Connection:
+def _pg_url() -> Optional[str]:
+    url = os.environ.get("DATABASE_URL", "").strip()
+    if not url:
+        return None
+    if url.startswith("postgres://"):
+        url = url.replace("postgres://", "postgresql://", 1)
+    return url
+
+
+def _is_pg_enabled() -> bool:
+    return _pg_url() is not None and create_engine is not None
+
+
+def get_conn(db_path: str = DB_PATH_DEFAULT):
+    url = _pg_url()
+    if url and create_engine is not None:
+        engine = create_engine(url, pool_pre_ping=True)
+        return {"engine": engine, "pg": True}
+    # Fallback: SQLite local
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
     conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL;")
     return conn
 
 
-def init_db(conn: sqlite3.Connection) -> None:
+def init_db(conn) -> None:
+    # Postgres path
+    if isinstance(conn, dict) and conn.get("pg") and text is not None:
+        engine = conn["engine"]
+        with engine.begin() as e:
+            e.execute(text(
+                """
+                CREATE TABLE IF NOT EXISTS movimientos (
+                    id INTEGER,
+                    fecha TIMESTAMP,
+                    detalle TEXT,
+                    monto DOUBLE PRECISION,
+                    es_gasto BOOLEAN,
+                    es_transferencia_o_abono BOOLEAN,
+                    es_compartido_posible BOOLEAN,
+                    fraccion_mia_sugerida DOUBLE PRECISION,
+                    monto_mio_estimado DOUBLE PRECISION,
+                    categoria_sugerida TEXT,
+                    detalle_norm TEXT,
+                    monto_real DOUBLE PRECISION,
+                    categoria TEXT,
+                    nota_usuario TEXT,
+                    unique_key TEXT UNIQUE
+                );
+                """
+            ))
+            # tablas auxiliares
+            e.execute(text("CREATE TABLE IF NOT EXISTS categorias (nombre TEXT UNIQUE);"))
+            e.execute(text("CREATE TABLE IF NOT EXISTS categoria_map (detalle_norm TEXT PRIMARY KEY, categoria TEXT);"))
+            e.execute(text("CREATE TABLE IF NOT EXISTS movimientos_ignorados (unique_key TEXT PRIMARY KEY, created_at TIMESTAMP DEFAULT NOW());"))
+        return
+
+    # SQLite path
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS movimientos (
@@ -41,7 +96,6 @@ def init_db(conn: sqlite3.Connection) -> None:
     )
     conn.commit()
 
-    # Migración: agregar columnas si la tabla ya existía sin ellas
     existing = {r[1] for r in conn.execute("PRAGMA table_info(movimientos)").fetchall()}
     for col, ddl in [
         ("monto_real", "ALTER TABLE movimientos ADD COLUMN monto_real REAL"),
@@ -55,7 +109,6 @@ def init_db(conn: sqlite3.Connection) -> None:
                 pass
     conn.commit()
 
-    # Lista de movimientos ignorados (no reingresar si se eliminaron manualmente)
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS movimientos_ignorados (
@@ -66,42 +119,37 @@ def init_db(conn: sqlite3.Connection) -> None:
     )
     conn.commit()
 
-    # Tabla de categorías (opcional, para persistir lista)
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS categorias (
-            nombre TEXT UNIQUE
-        );
-        """
-    )
+    conn.execute("CREATE TABLE IF NOT EXISTS categorias (nombre TEXT UNIQUE);")
+    conn.execute("CREATE TABLE IF NOT EXISTS categoria_map (detalle_norm TEXT PRIMARY KEY, categoria TEXT);")
     conn.commit()
 
-    # Mapa de categorías por detalle normalizado (autoetiquetado futuro)
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS categoria_map (
-            detalle_norm TEXT PRIMARY KEY,
-            categoria TEXT
-        );
-        """
-    )
-    conn.commit()
-
-def get_categories(conn: sqlite3.Connection) -> List[str]:
+def get_categories(conn) -> List[str]:
+    if isinstance(conn, dict) and conn.get("pg") and text is not None:
+        engine = conn["engine"]
+        with engine.begin() as e:
+            rows = e.execute(text("SELECT nombre FROM categorias ORDER BY nombre")).fetchall()
+        return [r[0] for r in rows]
     cur = conn.execute("SELECT nombre FROM categorias ORDER BY nombre")
     return [r[0] for r in cur.fetchall()]
 
 
-def replace_categories(conn: sqlite3.Connection, cats: List[str]) -> None:
+def replace_categories(conn, cats: List[str]) -> None:
     # Replace entire list atomically
     cats = [c.strip() for c in cats if c and isinstance(c, str)]
+    if isinstance(conn, dict) and conn.get("pg") and text is not None:
+        engine = conn["engine"]
+        with engine.begin() as e:
+            e.execute(text("DELETE FROM categorias"))
+            if cats:
+                e.execute(text("INSERT INTO categorias(nombre) VALUES (:n) ON CONFLICT DO NOTHING"), [{"n": c} for c in cats])
+        return
     with conn:
         conn.execute("DELETE FROM categorias")
         if cats:
             conn.executemany("INSERT OR IGNORE INTO categorias(nombre) VALUES (?)", [(c,) for c in cats])
 
 
-def update_categoria_map_from_df(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
+def update_categoria_map_from_df(conn, df: pd.DataFrame) -> int:
     if df is None or df.empty:
         return 0
     sub = df[["detalle_norm", "categoria"]].dropna()
@@ -110,20 +158,34 @@ def update_categoria_map_from_df(conn: sqlite3.Connection, df: pd.DataFrame) -> 
     sub = sub[(sub["categoria"].notna()) & (sub["categoria"].str.strip() != "")]
     if sub.empty:
         return 0
-    rows = sub.drop_duplicates("detalle_norm").values.tolist()
+    rows_df = sub.drop_duplicates("detalle_norm")
+    if isinstance(conn, dict) and conn.get("pg") and text is not None:
+        engine = conn["engine"]
+        with engine.begin() as e:
+            res = e.execute(
+                text(
+                    "INSERT INTO categoria_map(detalle_norm, categoria) VALUES(:detalle_norm, :categoria) "
+                    "ON CONFLICT(detalle_norm) DO UPDATE SET categoria=EXCLUDED.categoria"
+                ),
+                rows_df.to_dict(orient="records"),
+            )
+            return res.rowcount or 0
     cur = conn.executemany(
-        "INSERT INTO categoria_map(detalle_norm, categoria) VALUES(?, ?) "
-        "ON CONFLICT(detalle_norm) DO UPDATE SET categoria=excluded.categoria",
-        rows,
+        "INSERT INTO categoria_map(detalle_norm, categoria) VALUES(?, ?) ON CONFLICT(detalle_norm) DO UPDATE SET categoria=excluded.categoria",
+        rows_df.values.tolist(),
     )
     conn.commit()
     return cur.rowcount or 0
 
 
-def map_categories_for_df(conn: sqlite3.Connection, df: pd.DataFrame) -> pd.DataFrame:
+def map_categories_for_df(conn, df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty or "detalle_norm" not in df.columns:
         return df
-    mp = pd.read_sql_query("SELECT detalle_norm, categoria FROM categoria_map", conn)
+    if isinstance(conn, dict) and conn.get("pg"):
+        engine = conn["engine"]
+        mp = pd.read_sql_query("SELECT detalle_norm, categoria FROM categoria_map", engine)
+    else:
+        mp = pd.read_sql_query("SELECT detalle_norm, categoria FROM categoria_map", conn)
     if mp.empty:
         return df
     merged = df.merge(mp, on="detalle_norm", how="left", suffixes=(None, "_map"))
@@ -251,51 +313,74 @@ def upsert_transactions(conn: sqlite3.Connection, df: pd.DataFrame) -> Tuple[int
             m = 0.0
         return abs(m) if m < 0 else 0.0
 
-    rows: List[tuple] = []
+    rows_dicts: List[Dict[str, Any]] = []
     for _, r in df[cols].iterrows():
-        rows.append(
-            (
-                None if pd.isna(r["id"]) else int(r["id"]),
-                to_date_str(r["fecha"]),
-                None if pd.isna(r["detalle"]) else str(r["detalle"]),
-                to_float(r["monto"]),
-                to_int_bool(r["es_gasto"]),
-                to_int_bool(r["es_transferencia_o_abono"]),
-                to_int_bool(r["es_compartido_posible"]),
-                to_float(r["fraccion_mia_sugerida"]),
-                to_float(r["monto_mio_estimado"]),
-                None if pd.isna(r["categoria_sugerida"]) else str(r["categoria_sugerida"]),
-                None if pd.isna(r["detalle_norm"]) else str(r["detalle_norm"]),
-                # nuevos
-                to_float(default_monto_real(r)),
-                None if pd.isna(r.get("categoria", None)) else str(r.get("categoria")),
-                None if pd.isna(r.get("nota_usuario", None)) else str(r.get("nota_usuario")),
-                str(r["unique_key"]),
-            )
-        )
+        rows_dicts.append({
+            "id": None if pd.isna(r["id"]) else int(r["id"]),
+            "fecha": to_date_str(r["fecha"]),
+            "detalle": None if pd.isna(r["detalle"]) else str(r["detalle"]),
+            "monto": to_float(r["monto"]),
+            "es_gasto": to_int_bool(r["es_gasto"]),
+            "es_transferencia_o_abono": to_int_bool(r["es_transferencia_o_abono"]),
+            "es_compartido_posible": to_int_bool(r["es_compartido_posible"]),
+            "fraccion_mia_sugerida": to_float(r["fraccion_mia_sugerida"]),
+            "monto_mio_estimado": to_float(r["monto_mio_estimado"]),
+            "categoria_sugerida": None if pd.isna(r["categoria_sugerida"]) else str(r["categoria_sugerida"]),
+            "detalle_norm": None if pd.isna(r["detalle_norm"]) else str(r["detalle_norm"]),
+            "monto_real": to_float(default_monto_real(r)),
+            "categoria": None if pd.isna(r.get("categoria", None)) else str(r.get("categoria")),
+            "nota_usuario": None if pd.isna(r.get("nota_usuario", None)) else str(r.get("nota_usuario")),
+            "unique_key": str(r["unique_key"]),
+        })
 
+    # Postgres path
+    if isinstance(conn, dict) and conn.get("pg") and text is not None:
+        engine = conn["engine"]
+        sql = (
+            "INSERT INTO movimientos (id, fecha, detalle, monto, es_gasto, es_transferencia_o_abono, "
+            "es_compartido_posible, fraccion_mia_sugerida, monto_mio_estimado, categoria_sugerida, detalle_norm, "
+            "monto_real, categoria, nota_usuario, unique_key) "
+            "VALUES (:id, :fecha, :detalle, :monto, :es_gasto, :es_transferencia_o_abono, :es_compartido_posible, :fraccion_mia_sugerida, :monto_mio_estimado, :categoria_sugerida, :detalle_norm, :monto_real, :categoria, :nota_usuario, :unique_key) "
+            "ON CONFLICT (unique_key) DO NOTHING"
+        )
+        with engine.begin() as e:
+            res = e.execute(text(sql), rows_dicts)
+            inserted = res.rowcount or 0
+        ignored = len(rows_dicts) - inserted
+        return inserted, ignored
+
+    # SQLite path
     sql = (
         "INSERT OR IGNORE INTO movimientos (id, fecha, detalle, monto, es_gasto, es_transferencia_o_abono, "
         "es_compartido_posible, fraccion_mia_sugerida, monto_mio_estimado, categoria_sugerida, detalle_norm, "
         "monto_real, categoria, nota_usuario, unique_key) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
     )
-    cur = conn.executemany(sql, rows)
+    cur = conn.executemany(sql, [
+        (
+            r["id"], r["fecha"], r["detalle"], r["monto"], r["es_gasto"], r["es_transferencia_o_abono"], r["es_compartido_posible"],
+            r["fraccion_mia_sugerida"], r["monto_mio_estimado"], r["categoria_sugerida"], r["detalle_norm"], r["monto_real"], r["categoria"], r["nota_usuario"], r["unique_key"]
+        ) for r in rows_dicts
+    ])
     conn.commit()
     inserted = cur.rowcount if cur.rowcount is not None else 0
-
-    # For rows that already existed, we can optionally perform an UPDATE to refresh editable fields.
-    # Keep it simple: no overwrite on ingest except via explicit save from UI.
-    ignored = len(rows) - inserted
+    ignored = len(rows_dicts) - inserted
     return inserted, ignored
 
 
-def load_all(conn: sqlite3.Connection) -> pd.DataFrame:
-    df = pd.read_sql_query("SELECT * FROM movimientos", conn)
+def load_all(conn) -> pd.DataFrame:
+    if isinstance(conn, dict) and conn.get("pg"):
+        engine = conn["engine"]
+        df = pd.read_sql_query("SELECT * FROM movimientos", engine)
+    else:
+        df = pd.read_sql_query("SELECT * FROM movimientos", conn)
     if not df.empty:
         df["fecha"] = pd.to_datetime(df["fecha"], errors="coerce")
         for c in ["es_gasto", "es_transferencia_o_abono", "es_compartido_posible"]:
             if c in df.columns:
-                df[c] = df[c].apply(lambda x: bool(int(x)) if pd.notna(x) else False)
+                try:
+                    df[c] = df[c].apply(lambda x: bool(int(x)) if pd.notna(x) else False)
+                except Exception:
+                    df[c] = df[c].astype(bool)
     return df
 
 
@@ -409,3 +494,4 @@ def delete_transactions(conn: sqlite3.Connection, *, unique_keys: Optional[List[
         deleted += cur.rowcount or 0
     conn.commit()
     return deleted
+
