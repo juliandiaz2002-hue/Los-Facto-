@@ -357,4 +357,3 @@ chart_mensual = alt.Chart(mensual2).mark_line(point=True).encode(
     x=alt.X("mes:N"), y=alt.Y("monto:Q", axis=alt.Axis(format=",.0f")), tooltip=["mes:N", alt.Tooltip("monto:Q", format=",.0f")]
 ).properties(height=220)
 st.altair_chart(chart_mensual, use_container_width=True)
-
