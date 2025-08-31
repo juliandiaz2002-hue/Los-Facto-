@@ -383,7 +383,7 @@ with col2:
         if len(cat_agg_metric) > 0:
             st.metric("Categoría más relevante", f"{cat_agg_metric.index[0]}")
 
-# Donut por categoría (centrado y con leyenda a un lado para evitar recortes)
+# Donut por categoría (centrado y simple)
 if not df_plot.empty:
     amt_col = "monto" if "monto" in df_plot.columns else "monto_real_plot"
     cat_agg = (
@@ -393,83 +393,63 @@ if not df_plot.empty:
         .sort_values("total", ascending=False)
     )
     
-    # Layout mejorado: donut a la izquierda, leyenda interactiva a la derecha
-    donut_col1, donut_col2 = st.columns([2, 1])
+    # Layout simple: donut centrado, sin redundancia
+    st.markdown("### Distribución de Gastos por Categoría")
     
-    with donut_col1:
-        # Donut optimizado para Render con mejor estética
-        chart_donut = (
-            alt.Chart(cat_agg)
-            .mark_arc(
-                innerRadius=80, 
-                outerRadius=140, 
-                cornerRadius=4, 
-                padAngle=0.02,
-                stroke="#ffffff",
-                strokeWidth=2
-            )
-            .encode(
-                theta=alt.Theta("total:Q", stack=True),
-                color=alt.Color(
-                    "categoria:N",
-                    scale=alt.Scale(domain=domain, range=range_colors),
-                    legend=None  # Sin leyenda en el gráfico
-                ),
-                tooltip=[
-                    alt.Tooltip("categoria:N", title="Categoría"),
-                    alt.Tooltip("total:Q", format=",.0f", title="Total")
-                ],
-            )
-            .properties(
-                width=350, 
-                height=350,
-                title={
-                    "text": "Distribución de Gastos por Categoría",
-                    "fontSize": 16,
-                    "fontWeight": "bold",
-                    "color": "#133c60"
-                }
-            )
-            .configure_view(stroke=None)
-            .configure_axis(grid=False)
+    # Donut centrado y optimizado
+    chart_donut = (
+        alt.Chart(cat_agg)
+        .mark_arc(
+            innerRadius=80, 
+            outerRadius=140, 
+            cornerRadius=4, 
+            padAngle=0.02,
+            stroke="#ffffff",
+            strokeWidth=2
         )
+        .encode(
+            theta=alt.Theta("total:Q", stack=True),
+            color=alt.Color(
+                "categoria:N",
+                scale=alt.Scale(domain=domain, range=range_colors),
+                legend=alt.Legend(
+                    title="Categoría",
+                    orient="bottom",
+                    direction="horizontal",
+                    columns=4
+                )
+            ),
+            tooltip=[
+                alt.Tooltip("categoria:N", title="Categoría"),
+                alt.Tooltip("total:Q", format=",.0f", title="Total")
+            ],
+        )
+        .properties(
+            width=500, 
+            height=400
+        )
+        .configure_view(stroke=None)
+        .configure_axis(grid=False)
+    )
+    
+    # Centrar el donut
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
         st.altair_chart(chart_donut, use_container_width=True, theme="streamlit")
     
-    with donut_col2:
-        # Leyenda simple sin botones - solo información
-        st.markdown("**📊 Resumen por Categoría**")
-        st.markdown("---")
-        
-        # Mostrar solo las top 5 categorías para mantener simple
-        top_categories = cat_agg.head(5)
-        for idx, row in top_categories.iterrows():
-            categoria = row["categoria"]
-            total = row["total"]
-            porcentaje = (total / cat_agg["total"].sum()) * 100
-            
-            st.markdown(f"**{categoria}**")
-            st.caption(f"${total:,.0f} ({porcentaje:.1f}%)")
-            st.markdown("---")
-        
-        # Información adicional simple
-        if len(cat_agg) > 5:
-            st.caption(f"... y {len(cat_agg) - 5} categorías más")
-        
-        # Instrucción simple para el usuario
-        st.markdown("---")
-        st.caption("💡 **Haz clic en el donut para filtrar por categoría**")
-        
-        # Selector simple de categoría para filtrado manual
-        st.markdown("---")
-        st.markdown("**🔍 Filtro Manual**")
+    # Selector simple de categoría para filtrado
+    st.markdown("---")
+    col_filter1, col_filter2, col_filter3 = st.columns([1, 2, 1])
+    with col_filter2:
+        st.markdown("**🔍 Filtro por Categoría**")
         selected_category = st.selectbox(
             "Seleccionar categoría para filtrar:",
             options=["Todas las categorías"] + cat_agg["categoria"].tolist(),
-            key="manual_category_filter"
+            key="category_filter"
         )
         
         if selected_category != "Todas las categorías":
-            if st.button("✅ Aplicar filtro", key="apply_manual_filter"):
+            if st.button("✅ Aplicar filtro", key="apply_filter"):
                 st.session_state["filtered_category"] = selected_category
                 st.rerun()
 
@@ -575,10 +555,7 @@ with cols_ins[2]:
                 point=True,
                 stroke="#4e79a7",
                 strokeWidth=3,
-                pointSize=60,
-                pointColor="#4e79a7",
-                pointStroke="#ffffff",
-                pointStrokeWidth=2
+                pointSize=60
             )
             .encode(
                 x=alt.X("dow:N", sort=["Lun","Mar","Mié","Jue","Vie","Sáb","Dom"], title="Día de la Semana"),
@@ -886,10 +863,7 @@ chart_mensual = (
         point=True,
         stroke="#133c60",
         strokeWidth=3,
-        pointSize=80,
-        pointColor="#133c60",
-        pointStroke="#ffffff",
-        pointStrokeWidth=2
+        pointSize=80
     )
     .encode(
         x=alt.X("mes:N", title="Mes"),
