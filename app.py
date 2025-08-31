@@ -436,33 +436,42 @@ if not df_plot.empty:
         st.altair_chart(chart_donut, use_container_width=True, theme="streamlit")
     
     with donut_col2:
-        # Leyenda vertical interactiva a la derecha del donut
-        st.markdown("**🎯 Leyenda de Categorías**")
+        # Leyenda simple sin botones - solo información
+        st.markdown("**📊 Resumen por Categoría**")
         st.markdown("---")
         
-        # Crear leyenda interactiva con filtros
-        for idx, row in cat_agg.iterrows():
+        # Mostrar solo las top 5 categorías para mantener simple
+        top_categories = cat_agg.head(5)
+        for idx, row in top_categories.iterrows():
             categoria = row["categoria"]
             total = row["total"]
             porcentaje = (total / cat_agg["total"].sum()) * 100
             
-            # Color del círculo
-            color = range_colors[domain.index(categoria) % len(range_colors)]
-            
-            # Botón para filtrar por categoría
-            if st.button(
-                f"🔘 {categoria}",
-                key=f"filter_{categoria}",
-                help=f"Filtrar por {categoria}",
-                use_container_width=True
-            ):
-                # Filtrar la tabla por esta categoría
-                st.session_state["filtered_category"] = categoria
-                st.rerun()
-            
-            # Mostrar total y porcentaje
+            st.markdown(f"**{categoria}**")
             st.caption(f"${total:,.0f} ({porcentaje:.1f}%)")
             st.markdown("---")
+        
+        # Información adicional simple
+        if len(cat_agg) > 5:
+            st.caption(f"... y {len(cat_agg) - 5} categorías más")
+        
+        # Instrucción simple para el usuario
+        st.markdown("---")
+        st.caption("💡 **Haz clic en el donut para filtrar por categoría**")
+        
+        # Selector simple de categoría para filtrado manual
+        st.markdown("---")
+        st.markdown("**🔍 Filtro Manual**")
+        selected_category = st.selectbox(
+            "Seleccionar categoría para filtrar:",
+            options=["Todas las categorías"] + cat_agg["categoria"].tolist(),
+            key="manual_category_filter"
+        )
+        
+        if selected_category != "Todas las categorías":
+            if st.button("✅ Aplicar filtro", key="apply_manual_filter"):
+                st.session_state["filtered_category"] = selected_category
+                st.rerun()
 
 # Aplicar filtro de categoría si está seleccionado
 if "filtered_category" in st.session_state and st.session_state["filtered_category"]:
