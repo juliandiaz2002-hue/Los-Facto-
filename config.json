@@ -1,0 +1,28 @@
+{
+  "account_aliases": [
+    "JULIAN",
+    "CUENTA PROPIA",
+    "CTA VISTA",
+    "XXXX-1234",
+    "XXXX-5678"
+  ],
+  "reimbursement_window_days": 21,
+  "reimbursement_amount_tolerance": 1000,
+  "shared_keywords": [
+    "DIVID",
+    "COMPARTID",
+    "AMIGOS",
+    "TUSI",
+    "MITAD"
+  ],
+  "transfer_keywords": [
+    "TRASPAS",
+    "TRANSFER",
+    "ABONO",
+    "REEMB",
+    "REVERSA",
+    "CASHBACK",
+    "PAGO T",
+    "PAGO TARJ"
+  ]
+}

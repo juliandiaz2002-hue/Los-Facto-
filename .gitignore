@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+.pytest_cache/
+.DS_Store
+.venv/
+
+# Streamlit
+.streamlit/
+
+# Data
+data/*.db
+*.csv
+
+# Environments/Editor
+.env
+.idea/
+.vscode/
