@@ -6,10 +6,6 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: streamlit run app.py --server.port $PORT --server.address 0.0.0.0
     autoDeploy: true
-    disk:
-      name: gastos-data
-      mountPath: ./data
-      sizeGB: 1
     envVars:
       - key: PYTHON_VERSION
         value: "3.11.9"
@@ -17,3 +13,13 @@ services:
         value: "1"
       - key: STREAMLIT_BROWSER_GATHER_USAGE_STATS
         value: "false"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: factos-postgres
+          property: connectionString
+
+databases:
+  - name: factos-postgres
+    databaseName: factos_db
+    user: factos_user
+    plan: free

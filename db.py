@@ -202,11 +202,22 @@ def map_categories_for_df(conn, df: pd.DataFrame) -> pd.DataFrame:
     return merged
 
 
-def rename_category(conn: sqlite3.Connection, old_name: str, new_name: str) -> None:
+def rename_category(conn, old_name: str, new_name: str) -> None:
     if not old_name or not new_name or old_name == new_name:
         return
     if old_name == "Sin categoría":
         return  # no renombrar base
+    
+    if isinstance(conn, dict) and conn.get("pg") and text is not None:
+        engine = conn["engine"]
+        with engine.begin() as e:
+            e.execute(text("UPDATE categorias SET nombre=:new WHERE nombre=:old"), {"new": new_name, "old": old_name})
+            e.execute(text("INSERT INTO categorias(nombre) VALUES (:n) ON CONFLICT DO NOTHING"), {"n": new_name})
+            e.execute(text("DELETE FROM categorias WHERE nombre=:old"), {"old": old_name})
+            e.execute(text("UPDATE movimientos SET categoria=:new WHERE categoria=:old"), {"new": new_name, "old": old_name})
+            e.execute(text("UPDATE categoria_map SET categoria=:new WHERE categoria=:old"), {"new": new_name, "old": old_name})
+        return
+    
     with conn:
         conn.execute("UPDATE categorias SET nombre=? WHERE nombre=?", (new_name, old_name))
         conn.execute("INSERT OR IGNORE INTO categorias(nombre) VALUES (?)", (new_name,))
@@ -225,14 +236,18 @@ def _compute_unique_key_row(row: pd.Series) -> str:
     return f"h:{hash((fecha, monto, detalle_norm))}"
 
 
-def upsert_transactions(conn: sqlite3.Connection, df: pd.DataFrame) -> Tuple[int, int]:
+def upsert_transactions(conn, df: pd.DataFrame) -> Tuple[int, int]:
     df = df.copy()
     if "unique_key" not in df.columns:
         df["unique_key"] = df.apply(_compute_unique_key_row, axis=1)
 
     # Excluir ignorados por historial (p. ej., eliminados previamente)
     try:
-        ignored = pd.read_sql_query("SELECT unique_key FROM movimientos_ignorados", conn)["unique_key"].tolist()
+        if isinstance(conn, dict) and conn.get("pg"):
+            engine = conn["engine"]
+            ignored = pd.read_sql_query("SELECT unique_key FROM movimientos_ignorados", engine)["unique_key"].tolist()
+        else:
+            ignored = pd.read_sql_query("SELECT unique_key FROM movimientos_ignorados", conn)["unique_key"].tolist()
     except Exception:
         ignored = []
     if ignored:
@@ -311,6 +326,15 @@ def upsert_transactions(conn: sqlite3.Connection, df: pd.DataFrame) -> Tuple[int
             m = float(row.get("monto", 0))
         except Exception:
             m = 0.0
+        # Si existe columna 'tipo', úsala para decidir si es gasto
+        t = row.get("tipo")
+        if t is not None and not pd.isna(t):
+            tstr = str(t).strip().lower()
+            if tstr in ("gasto", "expense", "gastos"):
+                return abs(m)
+            else:
+                return 0.0
+        # Fallback por signo
         return abs(m) if m < 0 else 0.0
 
     rows_dicts: List[Dict[str, Any]] = []
@@ -346,6 +370,11 @@ def upsert_transactions(conn: sqlite3.Connection, df: pd.DataFrame) -> Tuple[int
         with engine.begin() as e:
             res = e.execute(text(sql), rows_dicts)
             inserted = res.rowcount or 0
+            # Sincronizar 'monto' en filas existentes que quedaron nulas/0 en cargas previas
+            e.execute(
+                text("UPDATE movimientos SET monto = v.m FROM (VALUES (:uk, :m)) AS v(uk,m) WHERE movimientos.unique_key = v.uk AND (movimientos.monto IS NULL OR movimientos.monto = 0)"),
+                [{"uk": r["unique_key"], "m": r["monto"]} for r in rows_dicts if r.get("monto") is not None]
+            )
         ignored = len(rows_dicts) - inserted
         return inserted, ignored
 
@@ -363,6 +392,12 @@ def upsert_transactions(conn: sqlite3.Connection, df: pd.DataFrame) -> Tuple[int
     ])
     conn.commit()
     inserted = cur.rowcount if cur.rowcount is not None else 0
+    # Sincronizar 'monto' en filas existentes con nulos/0
+    conn.executemany(
+        "UPDATE movimientos SET monto = ? WHERE unique_key = ? AND (monto IS NULL OR monto = 0)",
+        [(r["monto"], r["unique_key"]) for r in rows_dicts if r.get("monto") is not None]
+    )
+    conn.commit()
     ignored = len(rows_dicts) - inserted
     return inserted, ignored
 
@@ -384,7 +419,7 @@ def load_all(conn) -> pd.DataFrame:
     return df
 
 
-def apply_edits(conn: sqlite3.Connection, df_edits: pd.DataFrame) -> int:
+def apply_edits(conn, df_edits: pd.DataFrame) -> int:
     # Update only editable fields by id/unique_key.
     editable_cols = [
         # legacy fields
@@ -401,6 +436,7 @@ def apply_edits(conn: sqlite3.Connection, df_edits: pd.DataFrame) -> int:
     ]
 
     updates = 0
+    
     def to_int_bool(v: Any):
         if pd.isna(v) or v is None:
             return None
@@ -419,6 +455,57 @@ def apply_edits(conn: sqlite3.Connection, df_edits: pd.DataFrame) -> int:
         except Exception:
             return None
 
+    # Postgres path
+    if isinstance(conn, dict) and conn.get("pg") and text is not None:
+        engine = conn["engine"]
+        for _, r in df_edits.iterrows():
+            where_clause = ""
+            params = {}
+            
+            if pd.notna(r.get("id", None)):
+                where_clause = "id = :id"
+                params["id"] = int(r["id"])
+            elif pd.notna(r.get("unique_key", None)):
+                where_clause = "unique_key = :uk"
+                params["uk"] = str(r["unique_key"])
+            else:
+                continue
+
+            sets = []
+            set_vals = {}
+            for c in editable_cols:
+                if c in r.index:
+                    sets.append(f"{c} = :{c}")
+                    val = r[c]
+                    # Asegurar escalar
+                    if isinstance(val, pd.Series):
+                        val = val.iloc[0] if not val.empty else None
+                    if isinstance(val, (np.generic,)):
+                        val = val.item()
+                    if c in {"es_gasto", "es_transferencia_o_abono", "es_compartido_posible"}:
+                        set_vals[c] = to_int_bool(val)
+                    elif c in {"fraccion_mia_sugerida", "monto_mio_estimado", "monto_real"}:
+                        set_vals[c] = to_float(val)
+                    else:
+                        try:
+                            na = pd.isna(val)
+                            if isinstance(na, (pd.Series, np.ndarray, list)):
+                                na = False
+                        except Exception:
+                            na = False
+                        set_vals[c] = None if na else (None if val is None else str(val))
+            
+            if not sets:
+                continue
+
+            sql = f"UPDATE movimientos SET {', '.join(sets)} WHERE {where_clause}"
+            set_vals.update(params)
+            engine.execute(text(sql), set_vals)
+            updates += 1
+        
+        return updates
+
+    # SQLite path
     for _, r in df_edits.iterrows():
         where_clause = ""
         params = []
@@ -465,10 +552,44 @@ def apply_edits(conn: sqlite3.Connection, df_edits: pd.DataFrame) -> int:
     return updates
 
 
-def delete_transactions(conn: sqlite3.Connection, *, unique_keys: Optional[List[str]] = None, ids: Optional[List[int]] = None) -> int:
+def delete_transactions(conn, *, unique_keys: Optional[List[str]] = None, ids: Optional[List[int]] = None) -> int:
     deleted = 0
     # Construir lista de keys para ignorar en futuras ingestas
     keys_to_ignore: List[str] = []
+    
+    if isinstance(conn, dict) and conn.get("pg") and text is not None:
+        engine = conn["engine"]
+        
+        if ids:
+            with engine.begin() as e:
+                rows = e.execute(text("SELECT unique_key FROM movimientos WHERE id = ANY(:ids)"), {"ids": ids}).fetchall()
+                keys_to_ignore += [r[0] for r in rows if r and r[0]]
+                # También marca id:* por si suben un CSV futuro que no tenga la misma unique_key
+                keys_to_ignore += [f"id:{int(i)}" for i in ids]
+        
+        if unique_keys:
+            keys_to_ignore += list(unique_keys)
+
+        if keys_to_ignore:
+            with engine.begin() as e:
+                e.executemany(
+                    text("INSERT INTO movimientos_ignorados(unique_key) VALUES (:uk) ON CONFLICT DO NOTHING"),
+                    [{"uk": k} for k in keys_to_ignore if k],
+                )
+
+        if unique_keys:
+            with engine.begin() as e:
+                result = e.execute(text("DELETE FROM movimientos WHERE unique_key = ANY(:keys)"), {"keys": unique_keys})
+                deleted += result.rowcount or 0
+        
+        if ids:
+            with engine.begin() as e:
+                result = e.execute(text("DELETE FROM movimientos WHERE id = ANY(:ids)"), {"ids": ids})
+                deleted += result.rowcount or 0
+        
+        return deleted
+
+    # SQLite path
     if ids:
         qmarks = ",".join(["?"] * len(ids))
         rows = conn.execute(f"SELECT unique_key FROM movimientos WHERE id IN ({qmarks})", list(ids)).fetchall()
