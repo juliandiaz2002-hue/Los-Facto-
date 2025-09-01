@@ -488,15 +488,23 @@ if "filtered_category" in st.session_state and st.session_state["filtered_catego
     
     st.markdown("---")
 
-cols_ins = st.columns(3)
-with cols_ins[0]:
+
+# === Nueva disposición de gráficos ===
+# Fila A: izquierda (ancho) = Frecuencia por categoría (barras horizontales)
+#         derecha = Gastos por Día de la Semana (línea)
+col_left, col_right = st.columns([3, 2])
+
+with col_left:
     if not df_plot.empty:
         amt_col = "monto" if "monto" in df_plot.columns else "monto_real_plot"
-        freq = df_plot.groupby("categoria").size().reset_index(name="veces").sort_values("veces", ascending=False)
-        # Y axis config for frequency chart
+        freq = (
+            df_plot.groupby("categoria").size().reset_index(name="veces")
+                  .sort_values("veces", ascending=True)  # ascendente para horizontal
+        )
+        # Escala/ticks enteros para eje numérico (eje X ahora)
         max_veces = int(freq["veces"].max() or 1)
         tick_step = 1 if max_veces <= 5 else max(1, max_veces // 5)
-        y_enc_freq = alt.Y(
+        x_enc_freq = alt.X(
             "veces:Q",
             title="Cantidad de Transacciones",
             scale=alt.Scale(domain=[0, max_veces], nice=False, zero=True),
@@ -507,26 +515,20 @@ with cols_ins[0]:
                 values=list(range(0, max_veces + 1, tick_step))
             )
         )
-        # Gráfico de frecuencia mejorado
         chart_freq = (
             alt.Chart(freq)
-            .mark_bar(
-                cornerRadiusTopLeft=4,
-                cornerRadiusTopRight=4,
-                stroke="#ffffff",
-                strokeWidth=1
-            )
+            .mark_bar(cornerRadiusTopRight=4, cornerRadiusBottomRight=4, stroke="#ffffff", strokeWidth=1)
             .encode(
-                x=alt.X("categoria:N", sort='-y', title="Categoría"),
-                y=y_enc_freq,
+                y=alt.Y("categoria:N", sort="x", title="Categoría"),
+                x=x_enc_freq,
                 color=alt.Color("categoria:N", legend=None),
                 tooltip=[
                     alt.Tooltip("categoria:N", title="Categoría"),
-                    alt.Tooltip("veces:Q", title="Cantidad")
+                    alt.Tooltip("veces:Q", title="Cantidad", format="d")
                 ],
             )
             .properties(
-                height=220,
+                height=max(240, 20 * max(5, len(freq))),  # alto dinámico según nº de categorías
                 title={
                     "text": "Frecuencia por Categoría",
                     "fontSize": 14,
@@ -538,42 +540,8 @@ with cols_ins[0]:
             .configure_axis(grid=False)
         )
         st.altair_chart(chart_freq, use_container_width=True)
-with cols_ins[1]:
-    if not df_plot.empty:
-        amt_col = "monto" if "monto" in df_plot.columns else "monto_real_plot"
-        avg = df_plot.assign(_amt=df_plot[amt_col].abs()).groupby("categoria")["_amt"].mean().reset_index().rename(columns={'_amt':'ticket_prom'})
-        # Gráfico de ticket promedio mejorado
-        chart_avg = (
-            alt.Chart(avg)
-            .mark_bar(
-                cornerRadiusTopLeft=4,
-                cornerRadiusTopRight=4,
-                stroke="#ffffff",
-                strokeWidth=1
-            )
-            .encode(
-                x=alt.X("categoria:N", sort='-y', title="Categoría"),
-                y=alt.Y("ticket_prom:Q", title="Ticket Promedio", axis=alt.Axis(format=",.0f")),
-                color=alt.Color("categoria:N", legend=None),
-                tooltip=[
-                    alt.Tooltip("categoria:N", title="Categoría"),
-                    alt.Tooltip("ticket_prom:Q", format=",.0f", title="Ticket Promedio")
-                ],
-            )
-            .properties(
-                height=220,
-                title={
-                    "text": "Ticket Promedio por Categoría",
-                    "fontSize": 14,
-                    "fontWeight": "bold",
-                    "color": "#133c60"
-                }
-            )
-            .configure_view(stroke=None)
-            .configure_axis(grid=False)
-        )
-        st.altair_chart(chart_avg, use_container_width=True)
-with cols_ins[2]:
+
+with col_right:
     if not df_plot.empty:
         dia_map = {0: "Lun", 1: "Mar", 2: "Mié", 3: "Jue", 4: "Vie", 5: "Sáb", 6: "Dom"}
         df_plot["dow"] = df_plot["fecha"].dt.dayofweek.map(dia_map)
@@ -581,36 +549,59 @@ with cols_ins[2]:
         amt_col = "monto" if "monto" in df_plot.columns else "monto_real_plot"
         dow_agg = df_plot.assign(_amt=np.abs(df_plot[amt_col].astype(float))).groupby(["dow", "dow_idx"])['_amt'].sum().reset_index()
         dow_agg.rename(columns={"_amt": "total"}, inplace=True)
-        # Gráfico de gastos por día de semana mejorado
         chart_dow = (
             alt.Chart(dow_agg)
-            .mark_line(
-                point={"size": 60},
-                stroke="#4e79a7",
-                strokeWidth=3,
-                
-            )
+            .mark_line(point={"size": 60}, stroke="#4e79a7", strokeWidth=3)
             .encode(
                 x=alt.X("dow:N", sort=["Lun","Mar","Mié","Jue","Vie","Sáb","Dom"], title="Día de la Semana"),
                 y=alt.Y("total:Q", title="Total de Gastos", axis=alt.Axis(format=",.0f")),
-                tooltip=[
-                    alt.Tooltip("dow:N", title="Día"),
-                    alt.Tooltip("total:Q", format=",.0f", title="Total")
-                ],
+                tooltip=[alt.Tooltip("dow:N", title="Día"), alt.Tooltip("total:Q", format=",.0f", title="Total")],
             )
-            .properties(
-                height=220,
-                title={
-                    "text": "Gastos por Día de la Semana",
-                    "fontSize": 14,
-                    "fontWeight": "bold",
-                    "color": "#133c60"
-                }
-            )
+            .properties(height=300, title={"text": "Gastos por Día de la Semana", "fontSize": 14, "fontWeight": "bold", "color": "#133c60"})
             .configure_view(stroke=None)
             .configure_axis(grid=False)
         )
         st.altair_chart(chart_dow, use_container_width=True)
+
+# Fila B (completa): Ticket promedio por categoría (barras horizontales)
+st.markdown("---")
+if not df_plot.empty:
+    amt_col = "monto" if "monto" in df_plot.columns else "monto_real_plot"
+    avg = (
+        df_plot.assign(_amt=df_plot[amt_col].abs())
+              .groupby("categoria")["_amt"].mean().reset_index()
+              .rename(columns={'_amt':'ticket_prom'})
+              .sort_values("ticket_prom", ascending=True)
+    )
+    max_ticket = float(avg["ticket_prom"].max() or 1.0)
+    step_ticket = max(1000.0, round(max_ticket/5, -3)) if max_ticket > 5000 else max(100.0, round(max_ticket/5, -2))
+    vals = list(np.arange(0, max_ticket + step_ticket, step_ticket))
+    x_enc_avg = alt.X(
+        "ticket_prom:Q",
+        title="Ticket Promedio",
+        axis=alt.Axis(format=",.0f", values=vals),
+        scale=alt.Scale(domain=[0, max_ticket], nice=False, zero=True)
+    )
+    chart_avg = (
+        alt.Chart(avg)
+        .mark_bar(cornerRadiusTopRight=4, cornerRadiusBottomRight=4, stroke="#ffffff", strokeWidth=1)
+        .encode(
+            y=alt.Y("categoria:N", sort="x", title="Categoría"),
+            x=x_enc_avg,
+            color=alt.Color("categoria:N", legend=None),
+            tooltip=[
+                alt.Tooltip("categoria:N", title="Categoría"),
+                alt.Tooltip("ticket_prom:Q", format=",.0f", title="Ticket Promedio")
+            ],
+        )
+        .properties(
+            height=max(260, 22 * max(5, len(avg))),
+            title={"text": "Ticket Promedio por Categoría", "fontSize": 14, "fontWeight": "bold", "color": "#133c60"}
+        )
+        .configure_view(stroke=None)
+        .configure_axis(grid=False)
+    )
+    st.altair_chart(chart_avg, use_container_width=True)
 
 # Comparación mes seleccionado vs anterior
 if sel_mes and sel_mes != "Todos" and not df_plot.empty:
