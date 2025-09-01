@@ -68,7 +68,16 @@ def init_db(conn) -> None:
             # tablas auxiliares
             e.execute(text("CREATE TABLE IF NOT EXISTS categorias (nombre TEXT UNIQUE);"))
             e.execute(text("CREATE TABLE IF NOT EXISTS categoria_map (detalle_norm TEXT PRIMARY KEY, categoria TEXT);"))
-            e.execute(text("CREATE TABLE IF NOT EXISTS movimientos_ignorados (unique_key TEXT PRIMARY KEY, created_at TIMESTAMP DEFAULT NOW());"))
+            e.execute(text(
+                """
+                CREATE TABLE IF NOT EXISTS movimientos_ignorados (
+                    id SERIAL PRIMARY KEY,
+                    unique_key TEXT UNIQUE,
+                    payload TEXT,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                );
+                """
+            ))
         return
 
     # SQLite path
@@ -112,8 +121,10 @@ def init_db(conn) -> None:
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS movimientos_ignorados (
-            unique_key TEXT PRIMARY KEY,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            unique_key TEXT UNIQUE,
+            payload TEXT,
+            created_at TEXT DEFAULT (DATETIME('now'))
         );
         """
     )
@@ -292,15 +303,17 @@ def upsert_transactions(conn, df: pd.DataFrame) -> Tuple[int, int]:
         except Exception:
             return str(v)
 
-    def to_int_bool(v: Any):
+    def to_bool(v: Any):
         if pd.isna(v) or v is None:
             return None
         if isinstance(v, (bool, np.bool_)):
-            return int(bool(v))
+            return bool(v)
+        # aceptar 0/1, "0"/"1"
         try:
-            return int(v)
+            return bool(int(v))
         except Exception:
-            return None
+            s = str(v).strip().lower()
+            return s in {"1", "true", "t", "yes", "y", "si", "sí", "s", "verdadero"}
 
     def to_float(v: Any):
         if pd.isna(v) or v is None:
@@ -344,9 +357,9 @@ def upsert_transactions(conn, df: pd.DataFrame) -> Tuple[int, int]:
             "fecha": to_date_str(r["fecha"]),
             "detalle": None if pd.isna(r["detalle"]) else str(r["detalle"]),
             "monto": to_float(r["monto"]),
-            "es_gasto": to_int_bool(r["es_gasto"]),
-            "es_transferencia_o_abono": to_int_bool(r["es_transferencia_o_abono"]),
-            "es_compartido_posible": to_int_bool(r["es_compartido_posible"]),
+            "es_gasto": to_bool(r["es_gasto"]),
+            "es_transferencia_o_abono": to_bool(r["es_transferencia_o_abono"]),
+            "es_compartido_posible": to_bool(r["es_compartido_posible"]),
             "fraccion_mia_sugerida": to_float(r["fraccion_mia_sugerida"]),
             "monto_mio_estimado": to_float(r["monto_mio_estimado"]),
             "categoria_sugerida": None if pd.isna(r["categoria_sugerida"]) else str(r["categoria_sugerida"]),
@@ -359,46 +372,73 @@ def upsert_transactions(conn, df: pd.DataFrame) -> Tuple[int, int]:
 
     # Postgres path
     if isinstance(conn, dict) and conn.get("pg") and text is not None:
+        import json
         engine = conn["engine"]
-        sql = (
-            "INSERT INTO movimientos (id, fecha, detalle, monto, es_gasto, es_transferencia_o_abono, "
-            "es_compartido_posible, fraccion_mia_sugerida, monto_mio_estimado, categoria_sugerida, detalle_norm, "
-            "monto_real, categoria, nota_usuario, unique_key) "
-            "VALUES (:id, :fecha, :detalle, :monto, :es_gasto, :es_transferencia_o_abono, :es_compartido_posible, :fraccion_mia_sugerida, :monto_mio_estimado, :categoria_sugerida, :detalle_norm, :monto_real, :categoria, :nota_usuario, :unique_key) "
-            "ON CONFLICT (unique_key) DO NOTHING"
-        )
+        inserted = 0
+        ignored = 0
         with engine.begin() as e:
-            res = e.execute(text(sql), rows_dicts)
-            inserted = res.rowcount or 0
-            # Sincronizar 'monto' en filas existentes que quedaron nulas/0 en cargas previas
-            e.execute(
-                text("UPDATE movimientos SET monto = v.m FROM (VALUES (:uk, :m)) AS v(uk,m) WHERE movimientos.unique_key = v.uk AND (movimientos.monto IS NULL OR movimientos.monto = 0)"),
-                [{"uk": r["unique_key"], "m": r["monto"]} for r in rows_dicts if r.get("monto") is not None]
-            )
-        ignored = len(rows_dicts) - inserted
+            for r in rows_dicts:
+                # single-row insert; if conflicts, rowcount will be 0
+                res = e.execute(text(
+                    """
+                    INSERT INTO movimientos (id, fecha, detalle, monto, es_gasto, es_transferencia_o_abono,
+                                              es_compartido_posible, fraccion_mia_sugerida, monto_mio_estimado, categoria_sugerida,
+                                              detalle_norm, monto_real, categoria, nota_usuario, unique_key)
+                    VALUES (:id, :fecha, :detalle, :monto, :es_gasto, :es_transferencia_o_abono,
+                            :es_compartido_posible, :fraccion_mia_sugerida, :monto_mio_estimado, :categoria_sugerida,
+                            :detalle_norm, :monto_real, :categoria, :nota_usuario, :unique_key)
+                    ON CONFLICT (unique_key) DO NOTHING
+                    """
+                ), r)
+                if (res.rowcount or 0) > 0:
+                    inserted += 1
+                    # si existían filas con monto nulo, sincronizar monto
+                    if r.get("monto") is not None:
+                        e.execute(text(
+                            "UPDATE movimientos SET monto = :m WHERE unique_key = :uk AND (monto IS NULL OR monto = 0)"
+                        ), {"uk": r["unique_key"], "m": r["monto"]})
+                else:
+                    # duplicado: registrar en movimientos_ignorados con payload JSON
+                    payload = json.dumps(r, default=str)
+                    e.execute(text(
+                        "INSERT INTO movimientos_ignorados (unique_key, payload) VALUES (:uk, :payload) ON CONFLICT (unique_key) DO NOTHING"
+                    ), {"uk": r["unique_key"], "payload": payload})
+                    ignored += 1
         return inserted, ignored
 
     # SQLite path
+    import json
     sql = (
         "INSERT OR IGNORE INTO movimientos (id, fecha, detalle, monto, es_gasto, es_transferencia_o_abono, "
         "es_compartido_posible, fraccion_mia_sugerida, monto_mio_estimado, categoria_sugerida, detalle_norm, "
         "monto_real, categoria, nota_usuario, unique_key) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
     )
-    cur = conn.executemany(sql, [
-        (
-            r["id"], r["fecha"], r["detalle"], r["monto"], r["es_gasto"], r["es_transferencia_o_abono"], r["es_compartido_posible"],
-            r["fraccion_mia_sugerida"], r["monto_mio_estimado"], r["categoria_sugerida"], r["detalle_norm"], r["monto_real"], r["categoria"], r["nota_usuario"], r["unique_key"]
-        ) for r in rows_dicts
-    ])
+    inserted = 0
+    ignored = 0
+    for r in rows_dicts:
+        try:
+            conn.execute(sql, (
+                r["id"], r["fecha"], r["detalle"], r["monto"], r["es_gasto"], r["es_transferencia_o_abono"], r["es_compartido_posible"],
+                r["fraccion_mia_sugerida"], r["monto_mio_estimado"], r["categoria_sugerida"], r["detalle_norm"], r["monto_real"], r["categoria"], r["nota_usuario"], r["unique_key"]
+            ))
+            inserted += 1
+            # Sincronizar monto si estaba nulo/0
+            if r.get("monto") is not None:
+                conn.execute(
+                    "UPDATE movimientos SET monto = ? WHERE unique_key = ? AND (monto IS NULL OR monto = 0)",
+                    (r["monto"], r["unique_key"]),
+                )
+        except Exception as e:
+            if "UNIQUE constraint failed" in str(e):
+                payload = json.dumps(r, default=str)
+                conn.execute(
+                    "INSERT OR IGNORE INTO movimientos_ignorados (unique_key, payload) VALUES (?, ?)",
+                    (r["unique_key"], payload),
+                )
+                ignored += 1
+            else:
+                raise
     conn.commit()
-    inserted = cur.rowcount if cur.rowcount is not None else 0
-    # Sincronizar 'monto' en filas existentes con nulos/0
-    conn.executemany(
-        "UPDATE movimientos SET monto = ? WHERE unique_key = ? AND (monto IS NULL OR monto = 0)",
-        [(r["monto"], r["unique_key"]) for r in rows_dicts if r.get("monto") is not None]
-    )
-    conn.commit()
-    ignored = len(rows_dicts) - inserted
     return inserted, ignored
 
 
@@ -437,15 +477,17 @@ def apply_edits(conn, df_edits: pd.DataFrame) -> int:
 
     updates = 0
     
-    def to_int_bool(v: Any):
+    def to_bool(v: Any):
         if pd.isna(v) or v is None:
             return None
         if isinstance(v, (bool, np.bool_)):
-            return int(bool(v))
+            return bool(v)
+        # aceptar 0/1, "0"/"1"
         try:
-            return int(v)
+            return bool(int(v))
         except Exception:
-            return None
+            s = str(v).strip().lower()
+            return s in {"1", "true", "t", "yes", "y", "si", "sí", "s", "verdadero"}
 
     def to_float(v: Any):
         if pd.isna(v) or v is None:
@@ -483,7 +525,7 @@ def apply_edits(conn, df_edits: pd.DataFrame) -> int:
                     if isinstance(val, (np.generic,)):
                         val = val.item()
                     if c in {"es_gasto", "es_transferencia_o_abono", "es_compartido_posible"}:
-                        set_vals[c] = to_int_bool(val)
+                        set_vals[c] = to_bool(val)
                     elif c in {"fraccion_mia_sugerida", "monto_mio_estimado", "monto_real"}:
                         set_vals[c] = to_float(val)
                     else:
@@ -530,7 +572,7 @@ def apply_edits(conn, df_edits: pd.DataFrame) -> int:
                 if isinstance(val, (np.generic,)):
                     val = val.item()
                 if c in {"es_gasto", "es_transferencia_o_abono", "es_compartido_posible"}:
-                    set_vals.append(to_int_bool(val))
+                    set_vals.append(to_bool(val))
                 elif c in {"fraccion_mia_sugerida", "monto_mio_estimado", "monto_real"}:
                     set_vals.append(to_float(val))
                 else:
