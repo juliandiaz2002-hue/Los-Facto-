@@ -182,6 +182,16 @@ def _derive_shop_from_detalle(detalle):
             s = s.split(tok)[-1].strip()
     return s[:40] if len(s) > 40 else s
 
+# --- Helper: fecha robusta español ---
+def _safe_parse_date_es(x):
+    """Parsea fechas en español de forma tolerante; devuelve NaT si no reconoce."""
+    if pd.isna(x):
+        return pd.NaT
+    try:
+        return parser.parse(str(x), dayfirst=True, fuzzy=True)
+    except Exception:
+        return pd.NaT
+
 def load_any_to_schema(file_like, filename: str) -> pd.DataFrame:
     name = (filename or "").lower()
     # 1) leer bruto sin header para detectar fila de encabezado
@@ -228,11 +238,21 @@ def load_any_to_schema(file_like, filename: str) -> pd.DataFrame:
     out = pd.DataFrame()
     if tipo == "debito":
         # columnas típicas: Fecha | Categoría | Descripción | Monto
-        out["fecha"] = df["Fecha"].apply(lambda x: parser.parse(str(x), dayfirst=True, fuzzy=True) if pd.notna(x) else pd.NaT)
+        out["fecha"] = df["Fecha"].apply(_safe_parse_date_es)
         out["detalle"] = df["Descripción"].astype(str)
         out["monto"] = df["Monto"].apply(_money_to_float)
         out["monto"] = -out["monto"].abs()  # gasto como negativo
         out["categoria"] = df.get("Categoría", "Sin categoría")
+        # Filtrar filas inválidas típicas de pie de página/leyendas
+        invalid_markers = ["www.", "banco bice", "derechos reservados", "infórmese", "casa matriz", "©"]
+        def _is_invalid_row(row):
+            texto = (str(row.get("Fecha", "")) + " " + str(row.get("Descripción", ""))).lower()
+            return any(tok in texto for tok in invalid_markers)
+        if {"Fecha", "Descripción"}.issubset(df.columns):
+            mask_invalid = df.apply(_is_invalid_row, axis=1)
+            # Mantener solo filas con fecha válida y no marcadas como invalid
+            out = out[~mask_invalid]
+        out = out.dropna(subset=["fecha", "monto"], how="any")
     else:  # crédito
         out["fecha"] = pd.to_datetime(df["Fecha"], dayfirst=True, errors="coerce")
         # Algunos extractos usan 'Categoria' vs 'Categoría'
@@ -241,8 +261,17 @@ def load_any_to_schema(file_like, filename: str) -> pd.DataFrame:
         out["monto"] = pd.to_numeric(df["Monto $"], errors="coerce")
         out["monto"] = -out["monto"].abs()
         out["categoria"] = df.get(cat_col, "Sin categoría") if cat_col else "Sin categoría"
+        # Filtrar filas inválidas típicas de pie de página/leyendas para crédito
+        invalid_markers = ["www.", "banco bice", "derechos reservados", "infórmese", "casa matriz", "©"]
+        def _is_invalid_row_credito(row):
+            texto = (str(row.get("Fecha", "")) + " " + str(row.get("Detalle", ""))).lower()
+            return any(tok in texto for tok in invalid_markers)
+        if {"Fecha", "Detalle"}.issubset(df.columns):
+            mask_invalid = df.apply(_is_invalid_row_credito, axis=1)
+            # Aplicar la misma máscara sobre `out` por índice
+            out = out.loc[~mask_invalid]
+        out = out.dropna(subset=["fecha", "monto"], how="any")
     out["comercio"] = out["detalle"].apply(_derive_shop_from_detalle)
-    out = out.dropna(subset=["fecha", "monto"], how="any")
     out["categoria"] = out["categoria"].fillna("Sin categoría").astype(str)
     return out[["fecha","detalle","comercio","categoria","monto"]]
 
