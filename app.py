@@ -328,6 +328,22 @@ if uploaded is not None:
 
     # Autocompletar categoría desde el mapa aprendido
     df_in = map_categories_for_df(conn, df_in)
+    # Normalizar NUEVAMENTE los flags a booleanos reales (por si el mapeo de categorías cambió tipos)
+    truthy = {"1", "true", "t", "yes", "y", "si", "sí", "s", "verdadero"}
+    def _to_bool(v):
+        if isinstance(v, (bool, np.bool_)):
+            return bool(v)
+        return str(v).strip().lower() in truthy
+    for _col in ["es_gasto", "es_transferencia_o_abono", "es_compartido_posible"]:
+        if _col in df_in.columns:
+            df_in[_col] = df_in[_col].map(_to_bool)
+        else:
+            df_in[_col] = False
+    # Asegurar dtype object->bool puro (evita 0/1)
+    df_in["es_gasto"] = df_in["es_gasto"].astype(bool)
+    df_in["es_transferencia_o_abono"] = df_in["es_transferencia_o_abono"].astype(bool)
+    df_in["es_compartido_posible"] = df_in["es_compartido_posible"].astype(bool)
+
     inserted, ignored = upsert_transactions(conn, df_in)
     st.success(f"Ingeridos: {inserted} nuevas filas, ignoradas por duplicado: {ignored}")
 
