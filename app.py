@@ -313,6 +313,12 @@ with st.sidebar:
             "Rango de fechas",
             (min_fecha.date(), max_fecha.date()),
         )
+    view_mode = st.radio(
+    "Mostrar",
+    ["Gastos", "Abonos", "Ambos"],
+    index=0,
+    horizontal=True
+)
     st.divider()
     with st.expander("Gestionar categorías"):
         st.caption("Puedes eliminar o agregar categorías. Se guardan en la base.")
@@ -357,10 +363,19 @@ dfv = df.copy()
 # Asegurar tipo numérico en monto para evitar NaNs o strings
 if "monto" in dfv.columns:
     dfv["monto"] = pd.to_numeric(dfv["monto"], errors="coerce").fillna(0)
-# Determinar tipo de movimiento: usa columna 'tipo' si existe (por ejemplo en CSV exportado),
-# si no, deriva desde el signo de 'monto'.
+
+# Determinar tipo con prioridad:
+# 1) 'tipo' si existe
+# 2) flags booleanos si existen: 'es_gasto' o 'es_transferencia_o_abono'
+# 3) signo de 'monto' (negativo=gasto, positivo=abono) + fallback si todo es >= 0
 if "tipo" in dfv.columns:
     dfv["tipo_calc"] = dfv["tipo"].astype(str)
+elif "es_gasto" in dfv.columns:
+    tmp = dfv["es_gasto"].astype(str).str.lower()
+    dfv["tipo_calc"] = np.where(tmp.isin(["1","true","t","si","sí","y"]), "Gasto", "Abono")
+elif "es_transferencia_o_abono" in dfv.columns:
+    tmp = dfv["es_transferencia_o_abono"].astype(str).str.lower()
+    dfv["tipo_calc"] = np.where(tmp.isin(["1","true","t","si","sí","y"]), "Abono", "Gasto")
 else:
     dfv["tipo_calc"] = np.where(dfv["monto"] < 0, "Gasto", np.where(dfv["monto"] > 0, "Abono", "Cero"))
     # Fallback para CSV enriquecido re-importado (montos positivos, sin columna 'tipo')
@@ -382,8 +397,13 @@ elif rango:
 dfv["tipo"] = dfv["tipo_calc"]
 dfv["monto_cartola"] = dfv["monto"].abs()
 
-# Solo gastos en la vista principal (soporta CSVs exportados con 'monto' positivo)
-dfv = dfv[dfv["tipo"] == "Gasto"].copy()
+# Filtrado por tipo según selección del usuario
+if view_mode == "Gastos":
+    dfv = dfv[dfv["tipo"] == "Gasto"].copy()
+elif view_mode == "Abonos":
+    dfv = dfv[dfv["tipo"] == "Abono"].copy()
+else:
+    dfv = dfv.copy()  # Ambos
 
 # Filtro por categoría (para acompañar interacción del gráfico)
 cat_options = sorted([c for c in categories if c])
