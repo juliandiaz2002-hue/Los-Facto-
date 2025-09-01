@@ -539,13 +539,14 @@ def apply_edits(conn, df_edits: pd.DataFrame) -> int:
         for _, r in df_edits.iterrows():
             where_clause = ""
             params = {}
-            
-            if pd.notna(r.get("id", None)):
-                where_clause = "id = :id"
-                params["id"] = int(r["id"])
-            elif pd.notna(r.get("unique_key", None)):
+
+            # Preferir unique_key para evitar colisiones por ids repetidos entre CSVs
+            if pd.notna(r.get("unique_key", None)) and str(r.get("unique_key")).strip() != "":
                 where_clause = "unique_key = :uk"
                 params["uk"] = str(r["unique_key"])
+            elif pd.notna(r.get("id", None)):
+                where_clause = "id = :id"
+                params["id"] = int(r["id"])
             else:
                 continue
 
@@ -588,12 +589,13 @@ def apply_edits(conn, df_edits: pd.DataFrame) -> int:
     for _, r in df_edits.iterrows():
         where_clause = ""
         params = []
-        if pd.notna(r.get("id", None)):
-            where_clause = "id = ?"
-            params.append(int(r["id"]))
-        elif pd.notna(r.get("unique_key", None)):
+        # Preferir unique_key en SQLite también
+        if pd.notna(r.get("unique_key", None)) and str(r.get("unique_key")).strip() != "":
             where_clause = "unique_key = ?"
             params.append(str(r["unique_key"]))
+        elif pd.notna(r.get("id", None)):
+            where_clause = "id = ?"
+            params.append(int(r["id"]))
         else:
             continue
 
