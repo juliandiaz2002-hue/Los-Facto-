@@ -259,13 +259,21 @@ def rename_category(conn, old_name: str, new_name: str) -> None:
 
 
 def _compute_unique_key_row(row: pd.Series) -> str:
-    # Prefer explicit id if present; else hash of salient fields.
-    if pd.notna(row.get("id", None)):
-        return f"id:{int(row['id'])}"
+    """Genera una clave estable por contenido (no por id).
+    Usamos fecha + monto_real (o abs(monto)) + detalle_norm para evitar conflictos
+    cuando distintos CSV empiezan sus ids en 1.
+    """
     fecha = str(row.get("fecha", ""))
-    monto = str(row.get("monto", ""))
+    # priorizar monto_real si existe; si no, usar abs(monto)
+    mr = row.get("monto_real", None)
+    if pd.isna(mr) or mr is None:
+        try:
+            m = float(row.get("monto", 0))
+            mr = abs(m)
+        except Exception:
+            mr = 0.0
     detalle_norm = str(row.get("detalle_norm", ""))
-    return f"h:{hash((fecha, monto, detalle_norm))}"
+    return f"h:{hash((fecha, mr, detalle_norm))}"
 
 
 def upsert_transactions(conn, df: pd.DataFrame) -> Tuple[int, int]:
