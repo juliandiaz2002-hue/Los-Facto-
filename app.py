@@ -6,6 +6,7 @@ import pandas as pd
 import numpy as np
 import altair as alt
 from datetime import datetime, timedelta
+from dateutil import parser  # para parseo robusto de fechas en BICE beta
 
 from db import (
     get_conn,
@@ -90,6 +91,7 @@ MONTH_NAMES = {
     "09": "Septiembre", "10": "Octubre", "11": "Noviembre", "12": "Diciembre"
 }
 
+
 @st.cache_data(show_spinner=False)
 def load_df(file):
     df = pd.read_csv(file)
@@ -141,6 +143,101 @@ def load_df(file):
             df[sc] = df[sc].astype(str).replace({"nan": "", "None": ""}).fillna("")
     
     return df
+
+# === BICE beta: carga unificada CSV/XLSX (crédito/débito) a esquema estándar ===
+HEADER_TOKENS_DEBITO = {"Descripción", "Monto"}
+HEADER_TOKENS_CREDITO = {"Fecha", "Categoria", "Detalle"}
+
+def _bice_find_header_row(df_raw: pd.DataFrame):
+    for i, row in df_raw.iterrows():
+        vals = set(str(x).strip() for x in row.dropna().tolist())
+        if HEADER_TOKENS_DEBITO.issubset(vals):
+            return i, "debito"
+        if HEADER_TOKENS_CREDITO.issubset(vals):
+            return i, "credito"
+    return None, None
+
+def _money_to_float(x):
+    if pd.isna(x): return np.nan
+    s = str(x)
+    s = s.replace("$","").replace("CLP","").replace("\u00a0","").replace(" ","")
+    # normalizar 1.234,56 -> 1234.56
+    if s.count(",") >= 1 and s.count(".") == 0:
+        s = s.replace(".", "")
+        s = s.replace(",", ".")
+    else:
+        s = s.replace(",", "")
+    try:
+        return float(s)
+    except Exception:
+        return pd.to_numeric(s, errors="coerce")
+
+def _derive_shop_from_detalle(detalle):
+    s = str(detalle or "").strip()
+    if not s:
+        return "Sin información"
+    for tok in ["*", "-", "|", "—", "–", ":", ";"]:
+        if tok in s:
+            s = s.split(tok)[-1].strip()
+    return s[:40] if len(s) > 40 else s
+
+def load_any_to_schema(file_like, filename: str) -> pd.DataFrame:
+    name = (filename or "").lower()
+    # 1) leer bruto sin header para detectar fila de encabezado
+    if name.endswith((".xlsx", ".xls")):
+        df_raw = pd.read_excel(file_like, header=None)
+    else:
+        raw = file_like.read()
+        try:
+            txt = raw.decode("utf-8")
+        except Exception:
+            txt = raw.decode("latin-1")
+        sep = ";" if txt.count(";") > txt.count(",") else ","
+        df_raw = pd.read_csv(pd.compat.StringIO(txt), header=None, sep=sep)
+    hdr_idx, tipo = _bice_find_header_row(df_raw)
+    if hdr_idx is None:
+        raise ValueError("No se detectaron encabezados BICE esperados (débito/crédito).")
+
+    # 2) volver a cargar con el header correcto
+    if name.endswith((".xlsx", ".xls")):
+        # Debemos re-posicionar el puntero del archivo si es necesario
+        try:
+            file_like.seek(0)
+        except Exception:
+            pass
+        df = pd.read_excel(file_like, header=hdr_idx)
+    else:
+        try:
+            txt  # may exist from above
+        except NameError:
+            raw = file_like.read()
+            try:
+                txt = raw.decode("utf-8")
+            except Exception:
+                txt = raw.decode("latin-1")
+        sep = ";" if txt.count(";") > txt.count(",") else ","
+        df = pd.read_csv(pd.compat.StringIO(txt), header=hdr_idx, sep=sep)
+
+    out = pd.DataFrame()
+    if tipo == "debito":
+        # columnas típicas: Fecha | Categoría | Descripción | Monto
+        out["fecha"] = df["Fecha"].apply(lambda x: parser.parse(str(x), dayfirst=True, fuzzy=True) if pd.notna(x) else pd.NaT)
+        out["detalle"] = df["Descripción"].astype(str)
+        out["monto"] = df["Monto"].apply(_money_to_float)
+        out["monto"] = -out["monto"].abs()  # gasto como negativo
+        out["categoria"] = df.get("Categoría", "Sin categoría")
+    else:  # crédito
+        out["fecha"] = pd.to_datetime(df["Fecha"], dayfirst=True, errors="coerce")
+        # Algunos extractos usan 'Categoria' vs 'Categoría'
+        cat_col = "Categoria" if "Categoria" in df.columns else ("Categoría" if "Categoría" in df.columns else None)
+        out["detalle"] = df["Detalle"].astype(str)
+        out["monto"] = pd.to_numeric(df["Monto $"], errors="coerce")
+        out["monto"] = -out["monto"].abs()
+        out["categoria"] = df.get(cat_col, "Sin categoría") if cat_col else "Sin categoría"
+    out["comercio"] = out["detalle"].apply(_derive_shop_from_detalle)
+    out = out.dropna(subset=["fecha", "monto"], how="any")
+    out["categoria"] = out["categoria"].fillna("Sin categoría").astype(str)
+    return out[["fecha","detalle","comercio","categoria","monto"]]
 
 def build_suggestions_df(df, conn):
     """Construir DataFrame de sugerencias de categoría"""
@@ -247,16 +344,29 @@ if not categories:
     replace_categories(conn, DEFAULT_CATEGORIES)
     categories = DEFAULT_CATEGORIES[:]
 
+
+st.markdown("### Ingesta de datos")
+col_up_l, col_up_r = st.columns([3,2])
+with col_up_l:
+    use_bice_beta = st.checkbox("Usar modo BICE (beta) — aceptar CSV/XLSX de débito/crédito y normalizar automáticamente", value=False, help="Si lo desactivas, vuelve al flujo actual (CSV estandarizado).")
+accepted_types = ["csv","xlsx","xls"] if use_bice_beta else ["csv"]
 uploaded = st.file_uploader(
-    "Sube tu CSV estandarizado (movimientos_estandarizados_*.csv)", type=["csv"]
+    "Sube tu archivo de banco",
+    type=accepted_types
 )
 
 if uploaded is not None:
-    df_in = load_df(uploaded)
-    # Autocompletar categoría desde el mapa aprendido
-    df_in = map_categories_for_df(conn, df_in)
-    inserted, ignored = upsert_transactions(conn, df_in)
-    st.success(f"Ingeridos: {inserted} nuevas filas, ignoradas por duplicado: {ignored}")
+    try:
+        if use_bice_beta:
+            df_in = load_any_to_schema(uploaded, uploaded.name)
+        else:
+            df_in = load_df(uploaded)
+        # Autocompletar categoría desde el mapa aprendido
+        df_in = map_categories_for_df(conn, df_in)
+        inserted, ignored = upsert_transactions(conn, df_in)
+        st.success(f"Ingeridos: {inserted} nuevas filas, ignoradas por duplicado: {ignored}")
+    except Exception as e:
+        st.error(f"No se pudo procesar el archivo: {e}")
 
 # Cargar histórico desde DB
 df = load_all(conn)
