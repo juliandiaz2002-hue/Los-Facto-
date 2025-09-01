@@ -29,11 +29,29 @@ st.title("Dashboard de Facto$")
 st.markdown(
     """
     <style>
-    :root { --facto-primary:#133c60; }
-    section[data-testid="stSidebar"] > div { background-color: #f0f5fa; }
+    :root { --facto-primary:#22c55e; }
+    /* Sidebar dark background */
+    section[data-testid="stSidebar"] > div { background-color: #0b1220 !important; }
+    /* Buttons keep primary color */
     [data-testid="stSidebar"] .stButton > button { background-color: var(--facto-primary); color: white; border-color: var(--facto-primary); }
     [data-testid="stSidebar"] .stMultiSelect [data-baseweb="tag"] { background-color: var(--facto-primary); }
     [data-testid="stSidebar"] .stSelectbox > div > div { border-color: var(--facto-primary); }
+    /* Ensure text is readable in dark mode */
+    section[data-testid="stSidebar"] label,
+    section[data-testid="stSidebar"] span { color: #e5e7eb !important; }
+    /* Inputs/selects in sidebar */
+    section[data-testid="stSidebar"] input,
+    section[data-testid="stSidebar"] textarea,
+    section[data-testid="stSidebar"] div[role="combobox"],
+    section[data-testid="stSidebar"] select {
+      background-color: #111827 !important;
+      color: #e5e7eb !important;
+      border: 1px solid #334155 !important;
+    }
+    /* Slider track (if used) */
+    section[data-testid="stSidebar"] [data-baseweb="slider"] > div {
+      background: #1f2937 !important;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -425,8 +443,9 @@ if not df_plot.empty:
             ],
         )
         .properties(
-            width=500, 
-            height=400
+            width=500,
+            height=400,
+            padding={"top": 24, "right": 0, "bottom": 0, "left": 0}
         )
         .configure_view(stroke=None)
         .configure_axis(grid=False)
@@ -474,6 +493,20 @@ with cols_ins[0]:
     if not df_plot.empty:
         amt_col = "monto" if "monto" in df_plot.columns else "monto_real_plot"
         freq = df_plot.groupby("categoria").size().reset_index(name="veces").sort_values("veces", ascending=False)
+        # Y axis config for frequency chart
+        max_veces = int(freq["veces"].max() or 1)
+        tick_step = 1 if max_veces <= 5 else max(1, max_veces // 5)
+        y_enc_freq = alt.Y(
+            "veces:Q",
+            title="Cantidad de Transacciones",
+            scale=alt.Scale(domain=[0, max_veces], nice=False, zero=True),
+            axis=alt.Axis(
+                format="d",
+                tickCount=min(6, max_veces),
+                tickMinStep=1,
+                values=list(range(0, max_veces + 1, tick_step))
+            )
+        )
         # Gráfico de frecuencia mejorado
         chart_freq = (
             alt.Chart(freq)
@@ -485,7 +518,7 @@ with cols_ins[0]:
             )
             .encode(
                 x=alt.X("categoria:N", sort='-y', title="Categoría"),
-                y=alt.Y("veces:Q", title="Cantidad de Transacciones"),
+                y=y_enc_freq,
                 color=alt.Color("categoria:N", legend=None),
                 tooltip=[
                     alt.Tooltip("categoria:N", title="Categoría"),
