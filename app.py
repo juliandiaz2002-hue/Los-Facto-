@@ -1,5 +1,6 @@
 import os
 import re
+import io
 import unicodedata
 import streamlit as st
 import pandas as pd
@@ -185,7 +186,10 @@ def load_any_to_schema(file_like, filename: str) -> pd.DataFrame:
     name = (filename or "").lower()
     # 1) leer bruto sin header para detectar fila de encabezado
     if name.endswith((".xlsx", ".xls")):
-        df_raw = pd.read_excel(file_like, header=None)
+        try:
+            df_raw = pd.read_excel(file_like, header=None, engine="openpyxl")
+        except ImportError as e:
+            raise ValueError("Falta la dependencia 'openpyxl' para leer Excel. Agrega 'openpyxl' a requirements.txt y vuelve a desplegar.") from e
     else:
         raw = file_like.read()
         try:
@@ -193,7 +197,7 @@ def load_any_to_schema(file_like, filename: str) -> pd.DataFrame:
         except Exception:
             txt = raw.decode("latin-1")
         sep = ";" if txt.count(";") > txt.count(",") else ","
-        df_raw = pd.read_csv(pd.compat.StringIO(txt), header=None, sep=sep)
+        df_raw = pd.read_csv(io.StringIO(txt), header=None, sep=sep)
     hdr_idx, tipo = _bice_find_header_row(df_raw)
     if hdr_idx is None:
         raise ValueError("No se detectaron encabezados BICE esperados (débito/crédito).")
@@ -205,7 +209,10 @@ def load_any_to_schema(file_like, filename: str) -> pd.DataFrame:
             file_like.seek(0)
         except Exception:
             pass
-        df = pd.read_excel(file_like, header=hdr_idx)
+        try:
+            df = pd.read_excel(file_like, header=hdr_idx, engine="openpyxl")
+        except ImportError as e:
+            raise ValueError("Falta 'openpyxl' para leer Excel. Agrega 'openpyxl' a requirements.txt y vuelve a desplegar.") from e
     else:
         try:
             txt  # may exist from above
@@ -216,7 +223,7 @@ def load_any_to_schema(file_like, filename: str) -> pd.DataFrame:
             except Exception:
                 txt = raw.decode("latin-1")
         sep = ";" if txt.count(";") > txt.count(",") else ","
-        df = pd.read_csv(pd.compat.StringIO(txt), header=hdr_idx, sep=sep)
+        df = pd.read_csv(io.StringIO(txt), header=hdr_idx, sep=sep)
 
     out = pd.DataFrame()
     if tipo == "debito":
