@@ -399,20 +399,27 @@ def upsert_transactions(conn, df: pd.DataFrame) -> Tuple[int, int]:
         ignored = 0
         with engine.begin() as e:
             for r in rows_dicts:
-                # single-row insert; if conflicts, rowcount will be 0
-                res = e.execute(text(
+                # single-row insert; detectar inserción con RETURNING 1
+                inserted_now = e.execute(text(
                     """
-                    INSERT INTO movimientos (id, fecha, detalle, monto, es_gasto, es_transferencia_o_abono,
-                                              es_compartido_posible, fraccion_mia_sugerida, monto_mio_estimado, categoria_sugerida,
-                                              detalle_norm, monto_real, categoria, nota_usuario, unique_key)
-                    VALUES (:id, :fecha, :detalle, :monto, :es_gasto, :es_transferencia_o_abono,
+                    WITH ins AS (
+                        INSERT INTO movimientos (
+                            id, fecha, detalle, monto, es_gasto, es_transferencia_o_abono,
+                            es_compartido_posible, fraccion_mia_sugerida, monto_mio_estimado, categoria_sugerida,
+                            detalle_norm, monto_real, categoria, nota_usuario, unique_key
+                        ) VALUES (
+                            :id, :fecha, :detalle, :monto, :es_gasto, :es_transferencia_o_abono,
                             :es_compartido_posible, :fraccion_mia_sugerida, :monto_mio_estimado, :categoria_sugerida,
-                            :detalle_norm, :monto_real, :categoria, :nota_usuario, :unique_key)
-                    ON CONFLICT (unique_key) DO NOTHING
+                            :detalle_norm, :monto_real, :categoria, :nota_usuario, :unique_key
+                        )
+                        ON CONFLICT (unique_key) DO NOTHING
+                        RETURNING 1
+                    ) SELECT COUNT(*) FROM ins
                     """
-                ), r)
-                if (res.rowcount or 0) > 0:
-                    inserted += 1
+                ), r).scalar() or 0
+
+                if inserted_now > 0:
+                    inserted += inserted_now
                     # si existían filas con monto nulo, sincronizar monto
                     if r.get("monto") is not None:
                         e.execute(text(
