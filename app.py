@@ -5,6 +5,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import altair as alt
+import json
 from datetime import datetime, timedelta
 from sqlalchemy import text
 
@@ -141,6 +142,24 @@ def load_df(file):
         if sc in df.columns:
             df[sc] = df[sc].astype(str).replace({"nan": "", "None": ""}).fillna("")
     
+    # Generar unique_key si falta (fecha|detalle_norm|monto)
+    if "unique_key" not in df.columns:
+        def _uk(row):
+            f = row.get("fecha")
+            d = row.get("detalle_norm") or ""
+            m = row.get("monto")
+            try:
+                fstr = pd.to_datetime(f).strftime("%Y-%m-%d")
+            except Exception:
+                fstr = str(f)
+            try:
+                mval = float(m)
+                mstr = f"{mval:.2f}"
+            except Exception:
+                mstr = str(m)
+            base = f"{fstr}|{d}|{mstr}"
+            return str(abs(hash(base)))
+        df["unique_key"] = df.apply(_uk, axis=1)
     return df
 
 def build_suggestions_df(df, conn):
@@ -282,6 +301,19 @@ uploaded = st.file_uploader(
 
 if uploaded is not None:
     df_in = load_df(uploaded)
+
+    # Opción: forzar todo como Gasto (convierte montos a negativo y marca flags)
+    force_all_gasto = st.checkbox(
+        "Forzar todo como Gasto (convierte montos a negativo)", value=True,
+        help="Convierte todos los montos a negativos y marca tipo=Gasto; los ingresos los manejarás manualmente."
+    )
+    if force_all_gasto:
+        if "monto" in df_in.columns:
+            df_in["monto"] = -pd.to_numeric(df_in["monto"], errors="coerce").abs()
+        df_in["tipo"] = "Gasto"
+        df_in["es_gasto"] = True
+        df_in["es_transferencia_o_abono"] = False
+
     # Autocompletar categoría desde el mapa aprendido
     df_in = map_categories_for_df(conn, df_in)
     inserted, ignored = upsert_transactions(conn, df_in)
@@ -1016,28 +1048,100 @@ with st.expander("Movimientos ignorados"):
     try:
         if isinstance(conn, dict) and conn.get("pg"):
             engine = conn["engine"]
-            ignored_df = pd.read_sql_query("SELECT unique_key, created_at FROM movimientos_ignorados ORDER BY created_at DESC", engine)
+            ignored_df = pd.read_sql_query("SELECT id, unique_key, payload, created_at FROM movimientos_ignorados ORDER BY created_at DESC", engine)
         else:
-            ignored_df = pd.read_sql_query("SELECT unique_key, created_at FROM movimientos_ignorados ORDER BY created_at DESC", conn)
+            ignored_df = pd.read_sql_query("SELECT id, unique_key, payload, created_at FROM movimientos_ignorados ORDER BY created_at DESC", conn)
         
         if not ignored_df.empty:
             st.write(f"Total de movimientos ignorados: {len(ignored_df)}")
-            st.dataframe(ignored_df, use_container_width=True)
-            
-            # Opción para restaurar
-            if st.button("Restaurar todos los ignorados"):
-                try:
-                    if isinstance(conn, dict) and conn.get("pg"):
-                        engine = conn["engine"]
-                        with engine.begin() as cx:
-                            cx.execute(text("DELETE FROM movimientos_ignorados"))
-                    else:
-                        conn.execute("DELETE FROM movimientos_ignorados")
+            st.dataframe(ignored_df[["id","unique_key","created_at"]], use_container_width=True, height=240)
+
+            sel_ids = st.multiselect("Selecciona IDs para reincorporar", ignored_df["id"].tolist())
+            col_restore, col_restore_all, col_clear = st.columns(3)
+
+            def _restore_rows(subdf):
+                restored = 0
+                if isinstance(conn, dict) and conn.get("pg"):
+                    engine = conn["engine"]
+                    with engine.begin() as cx:
+                        for _, rr in subdf.iterrows():
+                            uk = rr["unique_key"]
+                            payload = rr["payload"]
+                            if not payload:
+                                continue
+                            row = json.loads(payload)
+                            # Reinsertar: eliminar si existía y volver a insertar con payload
+                            cx.execute(text("DELETE FROM movimientos WHERE unique_key = :uk"), {"uk": uk})
+                            cx.execute(text(
+                                """
+                                INSERT INTO movimientos (unique_key, fecha, detalle, detalle_norm, monto, categoria, nota_usuario, monto_real, es_gasto, es_transferencia_o_abono)
+                                VALUES (:unique_key, :fecha, :detalle, :detalle_norm, :monto, :categoria, :nota_usuario, :monto_real, :es_gasto, :es_transferencia_o_abono)
+                                """
+                            ), {
+                                "unique_key": row.get("unique_key"),
+                                "fecha": row.get("fecha"),
+                                "detalle": row.get("detalle"),
+                                "detalle_norm": row.get("detalle_norm"),
+                                "monto": row.get("monto"),
+                                "categoria": row.get("categoria"),
+                                "nota_usuario": row.get("nota_usuario"),
+                                "monto_real": row.get("monto_real"),
+                                "es_gasto": row.get("es_gasto"),
+                                "es_transferencia_o_abono": row.get("es_transferencia_o_abono"),
+                            })
+                            cx.execute(text("DELETE FROM movimientos_ignorados WHERE id = :id"), {"id": int(rr["id"])})
+                            restored += 1
+                else:
+                    for _, rr in subdf.iterrows():
+                        uk = rr["unique_key"]
+                        payload = rr["payload"]
+                        if not payload:
+                            continue
+                        row = json.loads(payload)
+                        conn.execute("DELETE FROM movimientos WHERE unique_key = ?", (uk,))
+                        conn.execute(
+                            """
+                            INSERT INTO movimientos (unique_key, fecha, detalle, detalle_norm, monto, categoria, nota_usuario, monto_real, es_gasto, es_transferencia_o_abono)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                row.get("unique_key"), row.get("fecha"), row.get("detalle"), row.get("detalle_norm"),
+                                row.get("monto"), row.get("categoria"), row.get("nota_usuario"), row.get("monto_real"),
+                                row.get("es_gasto"), row.get("es_transferencia_o_abono"),
+                            ),
+                        )
+                        conn.execute("DELETE FROM movimientos_ignorados WHERE id = ?", (int(rr["id"]),))
                         conn.commit()
-                    st.success("Todos los movimientos ignorados han sido restaurados. Pueden volver a aparecer en futuras cargas.")
+                        restored += 1
+                return restored
+
+            with col_restore:
+                if st.button("Reincorporar seleccionados") and sel_ids:
+                    sub = ignored_df[ignored_df["id"].isin(sel_ids)]
+                    restored = _restore_rows(sub)
+                    st.success(f"Reincorporados {restored} movimientos.")
                     st.rerun()
-                except Exception as e:
-                    st.error(f"Error al restaurar: {e}")
+
+            with col_restore_all:
+                if st.button("Reincorporar TODOS"):
+                    restored = _restore_rows(ignored_df)
+                    st.success(f"Reincorporados {restored} movimientos.")
+                    st.rerun()
+
+            with col_clear:
+                if st.button("Vaciar lista de ignorados"):
+                    try:
+                        if isinstance(conn, dict) and conn.get("pg"):
+                            engine = conn["engine"]
+                            with engine.begin() as cx:
+                                cx.execute(text("DELETE FROM movimientos_ignorados"))
+                        else:
+                            conn.execute("DELETE FROM movimientos_ignorados")
+                            conn.commit()
+                        st.success("Lista de ignorados vaciada.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error al limpiar ignorados: {e}")
         else:
             st.info("No hay movimientos ignorados.")
     except Exception as e:
