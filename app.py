@@ -995,3 +995,98 @@ with st.expander("Movimientos ignorados"):
             st.info("No hay movimientos ignorados.")
     except Exception as e:
         st.warning(f"No se pudo cargar movimientos ignorados: {e}")
+
+# === Diagnóstico rápido de la Base de Datos ===
+with st.expander("🔎 Diagnóstico de Base de Datos"):
+    try:
+        # Identificar backend
+        if isinstance(conn, dict) and conn.get("pg"):
+            engine = conn["engine"]
+            backend = "Postgres"
+            try:
+                from sqlalchemy.engine import Engine
+                url_str = engine.url.render_as_string(hide_password=True)
+            except Exception:
+                url_str = "(no disponible)"
+            st.write(f"**Backend:** {backend}")
+            st.code(url_str, language=None)
+
+            # Conteos clave
+            with engine.connect() as cx:
+                n_mov = cx.execute(text("SELECT COUNT(*) FROM movimientos")).scalar()
+                n_ign = cx.execute(text("SELECT COUNT(*) FROM movimientos_ignorados")).scalar() if cx.execute(text("SELECT to_regclass('public.movimientos_ignorados')")).scalar() == 'movimientos_ignorados' else 0
+                # Columnas presentes
+                cols = [r[0] for r in cx.execute(text("SELECT column_name FROM information_schema.columns WHERE table_name='movimientos' ORDER BY ordinal_position")).fetchall()]
+        else:
+            backend = "SQLite"
+            st.write(f"**Backend:** {backend}")
+            # Ruta del archivo SQLite
+            try:
+                db_path = getattr(conn, 'database', None) or getattr(conn, 'db', None) or "(ruta no disponible)"
+            except Exception:
+                db_path = "(ruta no disponible)"
+            st.code(str(db_path), language=None)
+
+            # Conteos clave
+            n_mov = pd.read_sql_query("SELECT COUNT(*) as c FROM movimientos", conn)["c"].iloc[0]
+            try:
+                n_ign = pd.read_sql_query("SELECT COUNT(*) as c FROM movimientos_ignorados", conn)["c"].iloc[0]
+            except Exception:
+                n_ign = 0
+            # Columnas presentes
+            cols = pd.read_sql_query("PRAGMA table_info(movimientos)", conn)["name"].tolist()
+
+        col_a, col_b, col_c = st.columns(3)
+        with col_a:
+            st.metric("Filas en movimientos", f"{n_mov:,}")
+        with col_b:
+            st.metric("Filas ignoradas", f"{n_ign:,}")
+        with col_c:
+            st.metric("Columnas en movimientos", f"{len(cols)}")
+        st.caption("Columnas detectadas en 'movimientos':")
+        st.code(", ".join(cols), language=None)
+
+        st.markdown("---")
+        st.caption("Muestra 5 filas (para confirmar contenido actual):")
+        try:
+            if backend == "Postgres":
+                with engine.connect() as cx:
+                    sample_df = pd.read_sql_query(text("SELECT * FROM movimientos ORDER BY fecha DESC LIMIT 5"), cx)
+            else:
+                sample_df = pd.read_sql_query("SELECT * FROM movimientos ORDER BY fecha DESC LIMIT 5", conn)
+            st.dataframe(sample_df, use_container_width=True)
+        except Exception as e:
+            st.info(f"No se pudo leer muestra: {e}")
+
+        st.markdown("---")
+        st.caption("Acciones destructivas (úsalas solo si quieres empezar de cero)")
+        colx, coly = st.columns(2)
+        with colx:
+            if st.button("🧹 Vaciar movimientos (DELETE)"):
+                try:
+                    if backend == "Postgres":
+                        with engine.begin() as cx:
+                            cx.execute(text("DELETE FROM movimientos"))
+                    else:
+                        conn.execute("DELETE FROM movimientos")
+                        conn.commit()
+                    st.success("Tabla 'movimientos' vaciada. Sube tu CSV nuevamente.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"No se pudo vaciar movimientos: {e}")
+        with coly:
+            if st.button("🧹 Vaciar ignorados (DELETE)"):
+                try:
+                    if backend == "Postgres":
+                        with engine.begin() as cx:
+                            cx.execute(text("DELETE FROM movimientos_ignorados"))
+                    else:
+                        conn.execute("DELETE FROM movimientos_ignorados")
+                        conn.commit()
+                    st.success("Tabla 'movimientos_ignorados' vaciada.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"No se pudo vaciar ignorados: {e}")
+
+    except Exception as e:
+        st.error(f"Diagnóstico falló: {e}")
