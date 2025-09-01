@@ -183,29 +183,56 @@ def build_suggestions_df(df, conn):
             })
             continue
         
-        # 2. Historial dominante por detalle_norm (≥70%)
+        # 2. Historial dominante por detalle_norm (≥70%) usando CTE para evitar window functions in HAVING
         if isinstance(conn, dict) and conn.get("pg"):
             engine = conn["engine"]
             with engine.connect() as cx:
                 result = cx.execute(text("""
-                    SELECT categoria, COUNT(*) as cnt, 
-                           COUNT(*) * 100.0 / SUM(COUNT(*)) OVER() as pct
-                    FROM movimientos 
-                    WHERE detalle_norm = :dn AND categoria IS NOT NULL AND categoria != 'Sin categoría'
-                    GROUP BY categoria
-                    HAVING COUNT(*) * 100.0 / SUM(COUNT(*)) OVER() >= 70
-                    ORDER BY cnt DESC
+                    WITH filt AS (
+                        SELECT categoria
+                        FROM movimientos
+                        WHERE detalle_norm = :dn
+                          AND categoria IS NOT NULL
+                          AND categoria != 'Sin categoría'
+                    ),
+                    stats AS (
+                        SELECT categoria, COUNT(*) AS cnt
+                        FROM filt
+                        GROUP BY categoria
+                    ),
+                    tot AS (
+                        SELECT COUNT(*) AS total FROM filt
+                    )
+                    SELECT s.categoria,
+                           s.cnt,
+                           (s.cnt * 100.0) / NULLIF(t.total, 0) AS pct
+                    FROM stats s CROSS JOIN tot t
+                    WHERE (s.cnt * 100.0) / NULLIF(t.total, 0) >= 70
+                    ORDER BY s.cnt DESC
                     LIMIT 1
                 """), {"dn": detalle_norm})
                 hist_match = result.fetchone()
         else:
             cur = conn.execute("""
-                SELECT categoria, COUNT(*) as cnt
-                FROM movimientos 
-                WHERE detalle_norm = ? AND categoria IS NOT NULL AND categoria != 'Sin categoría'
-                GROUP BY categoria
-                HAVING COUNT(*) * 100.0 / SUM(COUNT(*)) OVER() >= 70
-                ORDER BY cnt DESC
+                WITH filt AS (
+                    SELECT categoria
+                    FROM movimientos
+                    WHERE detalle_norm = ?
+                      AND categoria IS NOT NULL
+                      AND categoria != 'Sin categoría'
+                ),
+                stats AS (
+                    SELECT categoria, COUNT(*) AS cnt FROM filt GROUP BY categoria
+                ),
+                tot AS (
+                    SELECT COUNT(*) AS total FROM filt
+                )
+                SELECT s.categoria,
+                       s.cnt,
+                       (s.cnt * 100.0) / CASE WHEN t.total = 0 THEN NULL ELSE t.total END AS pct
+                FROM stats s, tot t
+                WHERE (s.cnt * 100.0) / CASE WHEN t.total = 0 THEN NULL ELSE t.total END >= 70
+                ORDER BY s.cnt DESC
                 LIMIT 1
             """, (detalle_norm,))
             hist_match = cur.fetchone()
