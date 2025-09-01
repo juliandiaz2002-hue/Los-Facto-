@@ -379,15 +379,35 @@ if draft_key in st.session_state and "unique_key" in df_plot.columns:
         df_plot = base.reset_index()
         df_plot["monto_real_plot"] = df_plot["monto"]
 
-# Paleta de colores por categoría
+# Paleta y mapeo de color consistente por categoría
 palette = [
     "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
     "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
     "#4e79a7", "#f28e2b", "#e15759", "#76b7b2", "#59a14f",
     "#edc949", "#af7aa1", "#ff9da7", "#9c755f", "#bab0ab",
 ]
-domain = cat_options
-range_colors = (palette * ((len(domain) // len(palette)) + 1))[: len(domain)]
+supermercado_color = "#22c55e"  # color fijo de la marca para Supermercado
+# Orden preferido: Supermercado primero si existe
+preferred = ["Supermercado"] + [c for c in cat_options if c != "Supermercado"]
+domain = preferred
+# Construir rango asegurando que Supermercado use su color fijo y el resto la paleta
+colors_by_category = {}
+colors_by_category["Supermercado"] = supermercado_color
+# rellenar restantes con la paleta en orden
+pal_iter = iter(palette)
+for c in domain:
+    if c == "Supermercado":
+        continue
+    # evitar reutilizar el mismo color verde
+    nxt = next(pal_iter, None)
+    if nxt is None:
+        pal_iter = iter(palette)
+        nxt = next(pal_iter)
+    # si por casualidad el color coincide con supermercado_color, salta al siguiente
+    if nxt.lower() == supermercado_color.lower():
+        nxt = next(pal_iter, "#4e79a7")
+    colors_by_category[c] = nxt
+range_colors = [colors_by_category[c] for c in domain]
 
 st.markdown("### Insights principales")
 col1, col2 = st.columns([1,1])
@@ -521,7 +541,7 @@ with col_left:
             .encode(
                 y=alt.Y("categoria:N", sort="x", title="Categoría"),
                 x=x_enc_freq,
-                color=alt.Color("categoria:N", legend=None),
+                color=alt.Color("categoria:N", legend=None, scale=alt.Scale(domain=domain, range=range_colors)),
                 tooltip=[
                     alt.Tooltip("categoria:N", title="Categoría"),
                     alt.Tooltip("veces:Q", title="Cantidad", format="d")
@@ -588,7 +608,7 @@ if not df_plot.empty:
         .encode(
             y=alt.Y("categoria:N", sort="x", title="Categoría"),
             x=x_enc_avg,
-            color=alt.Color("categoria:N", legend=None),
+            color=alt.Color("categoria:N", legend=None, scale=alt.Scale(domain=domain, range=range_colors)),
             tooltip=[
                 alt.Tooltip("categoria:N", title="Categoría"),
                 alt.Tooltip("ticket_prom:Q", format=",.0f", title="Ticket Promedio")
