@@ -552,7 +552,7 @@ with cols_ins[2]:
         chart_dow = (
             alt.Chart(dow_agg)
             .mark_line(
-                point={"size": 60}
+                point={"size": 60},
                 stroke="#4e79a7",
                 strokeWidth=3,
                 
@@ -860,7 +860,7 @@ mensual2 = df_month2.assign(_amt=np.abs(pd.to_numeric(df_month2[amt_col], errors
 chart_mensual = (
     alt.Chart(mensual2)
     .mark_line(
-        point={"size": 60}
+        point={"size": 60},
         stroke="#133c60",
         strokeWidth=3,
     )
