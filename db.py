@@ -651,7 +651,7 @@ def delete_transactions(conn, *, unique_keys: Optional[List[str]] = None, ids: O
 
         if keys_to_ignore:
             with engine.begin() as e:
-                e.executemany(
+                e.execute(
                     text("INSERT INTO movimientos_ignorados(unique_key) VALUES (:uk) ON CONFLICT DO NOTHING"),
                     [{"uk": k} for k in keys_to_ignore if k],
                 )
