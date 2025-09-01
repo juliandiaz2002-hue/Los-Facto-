@@ -6,6 +6,7 @@ import pandas as pd
 import numpy as np
 import altair as alt
 from datetime import datetime, timedelta
+from sqlalchemy import text
 
 from db import (
     get_conn,
@@ -162,9 +163,9 @@ def build_suggestions_df(df, conn):
         # 1. Mapa exacto (confianza 1.0)
         if isinstance(conn, dict) and conn.get("pg"):
             engine = conn["engine"]
-            from sqlalchemy import text
-            result = engine.execute(text("SELECT categoria FROM categoria_map WHERE detalle_norm = :dn"), {"dn": detalle_norm})
-            exact_match = result.fetchone()
+            with engine.connect() as cx:
+                result = cx.execute(text("SELECT categoria FROM categoria_map WHERE detalle_norm = :dn"), {"dn": detalle_norm})
+                exact_match = result.fetchone()
         else:
             cur = conn.execute("SELECT categoria FROM categoria_map WHERE detalle_norm = ?", (detalle_norm,))
             exact_match = cur.fetchone()
@@ -185,17 +186,18 @@ def build_suggestions_df(df, conn):
         # 2. Historial dominante por detalle_norm (≥70%)
         if isinstance(conn, dict) and conn.get("pg"):
             engine = conn["engine"]
-            result = engine.execute(text("""
-                SELECT categoria, COUNT(*) as cnt, 
-                       COUNT(*) * 100.0 / SUM(COUNT(*)) OVER() as pct
-                FROM movimientos 
-                WHERE detalle_norm = :dn AND categoria IS NOT NULL AND categoria != 'Sin categoría'
-                GROUP BY categoria
-                HAVING COUNT(*) * 100.0 / SUM(COUNT(*)) OVER() >= 70
-                ORDER BY cnt DESC
-                LIMIT 1
-            """), {"dn": detalle_norm})
-            hist_match = result.fetchone()
+            with engine.connect() as cx:
+                result = cx.execute(text("""
+                    SELECT categoria, COUNT(*) as cnt, 
+                           COUNT(*) * 100.0 / SUM(COUNT(*)) OVER() as pct
+                    FROM movimientos 
+                    WHERE detalle_norm = :dn AND categoria IS NOT NULL AND categoria != 'Sin categoría'
+                    GROUP BY categoria
+                    HAVING COUNT(*) * 100.0 / SUM(COUNT(*)) OVER() >= 70
+                    ORDER BY cnt DESC
+                    LIMIT 1
+                """), {"dn": detalle_norm})
+                hist_match = result.fetchone()
         else:
             cur = conn.execute("""
                 SELECT categoria, COUNT(*) as cnt
@@ -937,16 +939,16 @@ if st.button("Reparar montos"):
         # Buscar discrepancias entre monto y monto_real para gastos
         if isinstance(conn, dict) and conn.get("pg"):
             engine = conn["engine"]
-            from sqlalchemy import text
-            result = engine.execute(text("""
-                UPDATE movimientos 
-                SET monto = ABS(monto_real) 
-                WHERE monto_real IS NOT NULL 
-                AND monto_real > 0 
-                AND (monto IS NULL OR monto = 0 OR ABS(monto) != monto_real)
-                AND tipo = 'Gasto'
-            """))
-            updated_count = result.rowcount
+            with engine.begin() as cx:
+                result = cx.execute(text("""
+                    UPDATE movimientos 
+                    SET monto = ABS(monto_real) 
+                    WHERE monto_real IS NOT NULL 
+                    AND monto_real > 0 
+                    AND (monto IS NULL OR monto = 0 OR ABS(monto) != monto_real)
+                    AND tipo = 'Gasto'
+                """))
+                updated_count = result.rowcount
         else:
             cur = conn.execute("""
                 UPDATE movimientos 
@@ -981,7 +983,8 @@ with st.expander("Movimientos ignorados"):
                 try:
                     if isinstance(conn, dict) and conn.get("pg"):
                         engine = conn["engine"]
-                        engine.execute(text("DELETE FROM movimientos_ignorados"))
+                        with engine.begin() as cx:
+                            cx.execute(text("DELETE FROM movimientos_ignorados"))
                     else:
                         conn.execute("DELETE FROM movimientos_ignorados")
                         conn.commit()
