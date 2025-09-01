@@ -1090,3 +1090,29 @@ with st.expander("🔎 Diagnóstico de Base de Datos"):
 
     except Exception as e:
         st.error(f"Diagnóstico falló: {e}")
+
+# === Exportar base completa (backup) ===
+st.markdown("### Exportar base de datos (backup)")
+try:
+    # Leer TODA la tabla movimientos sin filtros de UI
+    if isinstance(conn, dict) and conn.get("pg"):
+        engine = conn["engine"]
+        with engine.connect() as cx:
+            df_all = pd.read_sql_query(text("SELECT * FROM movimientos ORDER BY fecha"), cx)
+    else:
+        df_all = pd.read_sql_query("SELECT * FROM movimientos ORDER BY fecha", conn)
+
+    if df_all is not None and not df_all.empty:
+        csv_bytes = df_all.to_csv(index=False).encode("utf-8")
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        st.download_button(
+            "⬇️ Exportar BD completa (CSV)",
+            data=csv_bytes,
+            file_name=f"movimientos_backup_{ts}.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+    else:
+        st.info("La tabla 'movimientos' está vacía.")
+except Exception as e:
+    st.error(f"No se pudo exportar la base: {e}")
