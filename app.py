@@ -314,6 +314,18 @@ if uploaded is not None:
         df_in["es_gasto"] = True
         df_in["es_transferencia_o_abono"] = False
 
+    # Normalizar flags booleanos a True/False (evita DataError de Postgres por 0/1)
+    for _col in ["es_gasto", "es_transferencia_o_abono", "es_compartido_posible"]:
+        if _col in df_in.columns:
+            s = df_in[_col].astype(str).str.strip().str.lower()
+            df_in[_col] = s.isin(["1", "true", "t", "yes", "y", "si", "sí"])
+        else:
+            # defaults razonables
+            if _col == "es_gasto":
+                df_in[_col] = bool(force_all_gasto)
+            else:
+                df_in[_col] = False
+
     # Autocompletar categoría desde el mapa aprendido
     df_in = map_categories_for_df(conn, df_in)
     inserted, ignored = upsert_transactions(conn, df_in)
