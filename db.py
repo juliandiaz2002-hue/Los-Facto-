@@ -78,6 +78,27 @@ def init_db(conn) -> None:
                 );
                 """
             ))
+            # --- Ensure columnas nuevas existen en PG (payload, created_at) ---
+            e.execute(text(
+                """
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='movimientos_ignorados' AND column_name='payload'
+                    ) THEN
+                        ALTER TABLE movimientos_ignorados ADD COLUMN payload TEXT;
+                    END IF;
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='movimientos_ignorados' AND column_name='created_at'
+                    ) THEN
+                        ALTER TABLE movimientos_ignorados ADD COLUMN created_at TIMESTAMPTZ DEFAULT NOW();
+                    END IF;
+                END
+                $$;
+                """
+            ))
         return
 
     # SQLite path
