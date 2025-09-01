@@ -946,7 +946,6 @@ if st.button("Reparar montos"):
                     WHERE monto_real IS NOT NULL 
                     AND monto_real > 0 
                     AND (monto IS NULL OR monto = 0 OR ABS(monto) != monto_real)
-                    AND tipo = 'Gasto'
                 """))
                 updated_count = result.rowcount
         else:
