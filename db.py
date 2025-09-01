@@ -578,7 +578,8 @@ def apply_edits(conn, df_edits: pd.DataFrame) -> int:
 
             sql = f"UPDATE movimientos SET {', '.join(sets)} WHERE {where_clause}"
             set_vals.update(params)
-            engine.execute(text(sql), set_vals)
+            with engine.begin() as cx:
+                cx.execute(text(sql), set_vals)
             updates += 1
         
         return updates
