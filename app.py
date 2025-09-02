@@ -815,9 +815,25 @@ if not df_plot.empty:
               .rename(columns={'_amt':'ticket_prom'})
               .sort_values("ticket_prom", ascending=True)
     )
-    max_ticket = float(avg["ticket_prom"].max() or 1.0)
-    step_ticket = max(1000.0, round(max_ticket/5, -3)) if max_ticket > 5000 else max(100.0, round(max_ticket/5, -2))
-    vals = list(np.arange(0, max_ticket + step_ticket, step_ticket))
+    # Valores seguros para eje X (evita NaN/Inf y pasos 0)
+    max_raw = None if avg.empty else avg["ticket_prom"].max()
+    try:
+        max_ticket = float(max_raw)
+    except Exception:
+        max_ticket = 0.0
+    if not np.isfinite(max_ticket) or max_ticket <= 0:
+        max_ticket = 1.0
+
+    # Escalonamiento del eje con fallback simple pero estable
+    if max_ticket > 5000:
+        step_ticket = float(max(1000.0, round(max_ticket / 5.0, -3)))
+    else:
+        step_ticket = float(max(100.0, round(max_ticket / 5.0, -2)))
+
+    if not np.isfinite(step_ticket) or step_ticket <= 0:
+        step_ticket = max(1.0, max_ticket / 5.0)
+
+    vals = list(np.arange(0.0, max_ticket + step_ticket, step_ticket))
     x_enc_avg = alt.X(
         "ticket_prom:Q",
         title="Ticket Promedio",
