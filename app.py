@@ -743,7 +743,8 @@ with col_left:
                   .sort_values("veces", ascending=True)  # ascendente para horizontal
         )
         # Escala/ticks enteros para eje numérico (eje X ahora)
-        max_veces = int(freq["veces"].max() or 1)
+        max_val = freq["veces"].max()
+        max_veces = 1 if pd.isna(max_val) or max_val is None else int(max_val)
         tick_step = 1 if max_veces <= 5 else max(1, max_veces // 5)
         x_enc_freq = alt.X(
             "veces:Q",
