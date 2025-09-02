@@ -65,6 +65,8 @@ def init_db(conn) -> None:
                 );
                 """
             ))
+            # Ensure unique index on unique_key for movimientos
+            e.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS idx_movimientos_unique_key ON movimientos(unique_key);"))
             # tablas auxiliares
             e.execute(text("CREATE TABLE IF NOT EXISTS categorias (nombre TEXT UNIQUE);"))
             e.execute(text("CREATE TABLE IF NOT EXISTS categoria_map (detalle_norm TEXT PRIMARY KEY, categoria TEXT);"))
@@ -99,6 +101,8 @@ def init_db(conn) -> None:
                 $$;
                 """
             ))
+            # Ensure unique index on unique_key for movimientos_ignorados
+            e.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS idx_mov_ign_unique_key ON movimientos_ignorados(unique_key);"))
         return
 
     # SQLite path
@@ -125,6 +129,9 @@ def init_db(conn) -> None:
         """
     )
     conn.commit()
+    # Ensure unique index on unique_key for movimientos in SQLite
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_movimientos_unique_key ON movimientos(unique_key);")
+    conn.commit()
 
     existing = {r[1] for r in conn.execute("PRAGMA table_info(movimientos)").fetchall()}
     for col, ddl in [
@@ -149,6 +156,9 @@ def init_db(conn) -> None:
         );
         """
     )
+    conn.commit()
+    # Ensure unique index on unique_key for movimientos_ignorados in SQLite
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_mov_ign_unique_key ON movimientos_ignorados(unique_key);")
     conn.commit()
 
     conn.execute("CREATE TABLE IF NOT EXISTS categorias (nombre TEXT UNIQUE);")

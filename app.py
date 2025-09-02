@@ -447,8 +447,20 @@ if uploaded is not None:
     inserted, ignored = upsert_transactions(conn, df_in)
     st.success(f"Ingeridos: {inserted} nuevas filas, ignoradas por duplicado: {ignored}")
 
+
 # Cargar histórico desde DB
 df = load_all(conn)
+# Depurar duplicados por unique_key (quedarse con el más reciente por fecha)
+try:
+    if "unique_key" in df.columns:
+        # ordenar por fecha asc para que el keep='last' deje el más nuevo
+        df = df.sort_values(by=["fecha"], ascending=True)
+        dup_count = int(df.duplicated(subset=["unique_key"], keep="last").sum())
+        if dup_count > 0:
+            df = df.drop_duplicates(subset=["unique_key"], keep="last").reset_index(drop=True)
+            st.caption(f"🔁 Depurado: se eliminaron {dup_count} duplicados por unique_key al cargar la BD.")
+except Exception as _dedupe_e:
+    st.caption(f"(No se pudo depurar duplicados: {_dedupe_e})")
 
 if df.empty:
     st.info(
