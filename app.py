@@ -6,6 +6,7 @@ import pandas as pd
 import numpy as np
 import altair as alt
 import json
+import math
 from datetime import datetime, timedelta
 from sqlalchemy import text
 
@@ -811,12 +812,13 @@ if not df_plot.empty:
     amt_col = "monto" if "monto" in df_plot.columns else "monto_real_plot"
     avg = (
         df_plot.assign(_amt=df_plot[amt_col].abs())
-              .groupby("categoria")["_amt"].mean().reset_index()
-              .rename(columns={'_amt':'ticket_prom'})
+              .groupby("categoria")['_amt'].mean().reset_index()
+              .rename(columns={'_amt': 'ticket_prom'})
               .sort_values("ticket_prom", ascending=True)
     )
+
     # Valores seguros para eje X (evita NaN/Inf y pasos 0)
-    max_raw = None if avg.empty else avg["ticket_prom"].max()
+    max_raw = 0.0 if avg.empty else avg["ticket_prom"].max()
     try:
         max_ticket = float(max_raw)
     except Exception:
@@ -824,22 +826,26 @@ if not df_plot.empty:
     if not np.isfinite(max_ticket) or max_ticket <= 0:
         max_ticket = 1.0
 
-    # Escalonamiento del eje con fallback simple pero estable
-    if max_ticket > 5000:
-        step_ticket = float(max(1000.0, round(max_ticket / 5.0, -3)))
+    # Escalonamiento robusto: usar pasos ENTEROS y nunca 0
+    step_base = max_ticket / 5.0
+    if step_base >= 5000:
+        step_i = int(max(1000, round(step_base, -3)))
     else:
-        step_ticket = float(max(100.0, round(max_ticket / 5.0, -2)))
+        step_i = int(max(100, round(step_base, -2)))
+    if not np.isfinite(step_i) or step_i <= 0:
+        step_i = 1
 
-    if not np.isfinite(step_ticket) or step_ticket <= 0:
-        step_ticket = max(1.0, max_ticket / 5.0)
+    # Construir ticks con range() entero para evitar errores de np.arange
+    max_i = int(math.ceil(max_ticket))
+    vals = list(range(0, max_i + step_i, step_i))
 
-    vals = list(np.arange(0.0, max_ticket + step_ticket, step_ticket))
     x_enc_avg = alt.X(
         "ticket_prom:Q",
         title="Ticket Promedio",
         axis=alt.Axis(format=",.0f", values=vals),
-        scale=alt.Scale(domain=[0, max_ticket], nice=False, zero=True)
+        scale=alt.Scale(domain=[0, max_i], nice=False, zero=True)
     )
+
     chart_avg = (
         alt.Chart(avg)
         .mark_bar(cornerRadiusTopRight=4, cornerRadiusBottomRight=4, stroke="#ffffff", strokeWidth=1)
