@@ -4,6 +4,9 @@ from typing import Tuple, Any, List, Optional, Dict
 
 import pandas as pd
 import numpy as np
+import hashlib
+import unicodedata
+import re
 try:
     from sqlalchemy import create_engine, text
 except Exception:  # sqlalchemy is optional locally
@@ -268,44 +271,67 @@ def rename_category(conn, old_name: str, new_name: str) -> None:
         conn.execute("UPDATE categoria_map SET categoria=? WHERE categoria=?", (new_name, old_name))
 
 
+
+def _normalize_text_basic(s: str) -> str:
+    """Lowercase, strip, collapse spaces, remove accents for stable matching."""
+    if s is None:
+        return ""
+    s = str(s).lower().strip()
+    # remove accents
+    s = unicodedata.normalize("NFD", s)
+    s = "".join(ch for ch in s if unicodedata.category(ch) != "Mn")
+    # collapse multiple whitespace
+    s = re.sub(r"\s+", " ", s)
+    return s
+
+def _stable_sig_key(fecha_iso: str, detalle_norm: str, monto_abs_2d: float) -> str:
+    raw = f"{fecha_iso}|{detalle_norm}|{monto_abs_2d:.2f}"
+    h = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+    return f"k:{h}"
+
 def _compute_unique_key_row(row: pd.Series) -> str:
-    """Clave estable por contenido: fecha (día) + detalle_norm + monto_cartola.
-    - fecha se normaliza a YYYY-MM-DD
-    - monto_cartola es el monto de cartola inmutable (abs del monto original)
-    - si no hay monto_cartola, usamos abs(monto)
-    """
-    # fecha normalizada
+    # fecha normalizada (YYYY-MM-DD)
     try:
         f = pd.to_datetime(row.get("fecha", None), errors="coerce").date().isoformat()
     except Exception:
         f = str(row.get("fecha", "")).strip()
 
-    # monto base estable
+    # detalle normalizado (si no viene detalle_norm, usamos detalle)
+    dn = row.get("detalle_norm", None)
+    if dn is None or (isinstance(dn, float) and pd.isna(dn)) or str(dn).strip() == "":
+        dn = row.get("detalle", "")
+    dn = _normalize_text_basic(dn)
+
+    # monto base estable (positivo, redondeado a 2 decimales)
     mc = row.get("monto_cartola", None)
     if pd.isna(mc) or mc is None:
         try:
             m = float(row.get("monto", 0))
-            mc = abs(m)
         except Exception:
-            mc = 0.0
+            m = 0.0
+        mc = abs(m)
     try:
-        mc_val = float(mc)
+        mc_val = round(float(mc), 2)
     except Exception:
         mc_val = 0.0
 
-    # detalle normalizado (asumimos que ya viene normalizado aguas arriba)
-    dn = str(row.get("detalle_norm", ""))
-
-    return f"h:{hash((f, mc_val, dn))}"
+    return _stable_sig_key(f, dn, mc_val)
 
 
 def upsert_transactions(conn, df: pd.DataFrame) -> Tuple[int, int]:
     df = df.copy()
-    # Asegurar monto_cartola para cálculo estable de unique_key
+    # --- Normalize detalle_norm and compute stable key inputs ---
+    if "detalle_norm" not in df.columns:
+        df["detalle_norm"] = df.get("detalle", "")
+    df["detalle_norm"] = df["detalle_norm"].astype(str).map(_normalize_text_basic)
+
     if "monto_cartola" not in df.columns:
-        df["monto_cartola"] = pd.to_numeric(df.get("monto", 0), errors="coerce").abs()
-    if "unique_key" not in df.columns:
-        df["unique_key"] = df.apply(_compute_unique_key_row, axis=1)
+        df["monto_cartola"] = pd.to_numeric(df.get("monto", 0), errors="coerce").abs().round(2)
+    else:
+        df["monto_cartola"] = pd.to_numeric(df["monto_cartola"], errors="coerce").fillna(0).abs().round(2)
+
+    # Always recompute a deterministic unique_key
+    df["unique_key"] = df.apply(_compute_unique_key_row, axis=1)
 
     # Excluir ignorados por historial (p. ej., eliminados previamente)
     try:
@@ -433,6 +459,28 @@ def upsert_transactions(conn, df: pd.DataFrame) -> Tuple[int, int]:
         ignored = 0
         with engine.begin() as e:
             for r in rows_dicts:
+                # Pre-check for an existing row with same signature (fecha, detalle_norm, abs(monto))
+                exists = e.execute(text(
+                    """
+                    SELECT 1
+                    FROM movimientos
+                    WHERE DATE(fecha) = :f
+                      AND detalle_norm = :dn
+                      AND ABS(COALESCE(monto, 0)) = :mc
+                    LIMIT 1
+                    """
+                ), {
+                    "f": r["fecha"],
+                    "dn": _normalize_text_basic(r.get("detalle_norm", "")),
+                    "mc": round(abs(r.get("monto") or 0.0), 2),
+                }).scalar()
+                if exists:
+                    payload = json.dumps(r, default=str)
+                    e.execute(text(
+                        "INSERT INTO movimientos_ignorados (unique_key, payload) VALUES (:uk, :payload) ON CONFLICT (unique_key) DO NOTHING"
+                    ), {"uk": r["unique_key"], "payload": payload})
+                    ignored += 1
+                    continue
                 # single-row insert; detectar inserción con RETURNING 1
                 inserted_now = e.execute(text(
                     """
@@ -478,6 +526,23 @@ def upsert_transactions(conn, df: pd.DataFrame) -> Tuple[int, int]:
     inserted = 0
     ignored = 0
     for r in rows_dicts:
+        # Pre-check for duplicate by signature in SQLite
+        cur = conn.execute(
+            "SELECT 1 FROM movimientos WHERE date(fecha) = ? AND detalle_norm = ? AND ABS(COALESCE(monto, 0)) = ? LIMIT 1",
+            (
+                r["fecha"],
+                _normalize_text_basic(r.get("detalle_norm", "")),
+                round(abs(r.get("monto") or 0.0), 2),
+            ),
+        )
+        if cur.fetchone():
+            payload = json.dumps(r, default=str)
+            conn.execute(
+                "INSERT OR IGNORE INTO movimientos_ignorados (unique_key, payload) VALUES (?, ?)",
+                (r["unique_key"], payload),
+            )
+            ignored += 1
+            continue
         try:
             conn.execute(sql, (
                 r["id"], r["fecha"], r["detalle"], r["monto"], r["es_gasto"], r["es_transferencia_o_abono"], r["es_compartido_posible"],
