@@ -269,25 +269,41 @@ def rename_category(conn, old_name: str, new_name: str) -> None:
 
 
 def _compute_unique_key_row(row: pd.Series) -> str:
-    """Genera una clave estable por contenido (no por id).
-    Usamos fecha + monto_real (o abs(monto)) + detalle_norm para evitar conflictos
-    cuando distintos CSV empiezan sus ids en 1.
+    """Clave estable por contenido: fecha (día) + detalle_norm + monto_cartola.
+    - fecha se normaliza a YYYY-MM-DD
+    - monto_cartola es el monto de cartola inmutable (abs del monto original)
+    - si no hay monto_cartola, usamos abs(monto)
     """
-    fecha = str(row.get("fecha", ""))
-    # priorizar monto_real si existe; si no, usar abs(monto)
-    mr = row.get("monto_real", None)
-    if pd.isna(mr) or mr is None:
+    # fecha normalizada
+    try:
+        f = pd.to_datetime(row.get("fecha", None), errors="coerce").date().isoformat()
+    except Exception:
+        f = str(row.get("fecha", "")).strip()
+
+    # monto base estable
+    mc = row.get("monto_cartola", None)
+    if pd.isna(mc) or mc is None:
         try:
             m = float(row.get("monto", 0))
-            mr = abs(m)
+            mc = abs(m)
         except Exception:
-            mr = 0.0
-    detalle_norm = str(row.get("detalle_norm", ""))
-    return f"h:{hash((fecha, mr, detalle_norm))}"
+            mc = 0.0
+    try:
+        mc_val = float(mc)
+    except Exception:
+        mc_val = 0.0
+
+    # detalle normalizado (asumimos que ya viene normalizado aguas arriba)
+    dn = str(row.get("detalle_norm", ""))
+
+    return f"h:{hash((f, mc_val, dn))}"
 
 
 def upsert_transactions(conn, df: pd.DataFrame) -> Tuple[int, int]:
     df = df.copy()
+    # Asegurar monto_cartola para cálculo estable de unique_key
+    if "monto_cartola" not in df.columns:
+        df["monto_cartola"] = pd.to_numeric(df.get("monto", 0), errors="coerce").abs()
     if "unique_key" not in df.columns:
         df["unique_key"] = df.apply(_compute_unique_key_row, axis=1)
 

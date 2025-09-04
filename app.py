@@ -123,6 +123,12 @@ def load_df(file):
     for c in ["monto", "fraccion_mia_sugerida", "monto_mio_estimado", "monto_real"]:
         if c in df.columns:
             df[c] = df[c].apply(_clean_amount)
+
+    # Monto de cartola inmutable (valor absoluto del monto original)
+    if "monto" in df.columns:
+        df["monto_cartola"] = pd.to_numeric(df["monto"], errors="coerce").abs()
+    else:
+        df["monto_cartola"] = np.nan
     
     if "id" not in df.columns:
         df["id"] = range(1, len(df) + 1)
@@ -143,24 +149,24 @@ def load_df(file):
         if sc in df.columns:
             df[sc] = df[sc].astype(str).replace({"nan": "", "None": ""}).fillna("")
     
-    # Generar unique_key si falta (fecha|detalle_norm|monto)
+    # Generar unique_key si falta (fecha|detalle_norm|monto_cartola); estable y no depende de ediciones
     if "unique_key" not in df.columns:
-        def _uk(row):
+        def _uk_stable(row):
             f = row.get("fecha")
             d = row.get("detalle_norm") or ""
-            m = row.get("monto")
+            mc = row.get("monto_cartola")
+            # normalizar fecha a YYYY-MM-DD
             try:
                 fstr = pd.to_datetime(f).strftime("%Y-%m-%d")
             except Exception:
                 fstr = str(f)
+            # monto de cartola en float
             try:
-                mval = float(m)
-                mstr = f"{mval:.2f}"
+                mc_val = float(mc)
             except Exception:
-                mstr = str(m)
-            base = f"{fstr}|{d}|{mstr}"
-            return str(abs(hash(base)))
-        df["unique_key"] = df.apply(_uk, axis=1)
+                mc_val = 0.0
+            return f"h:{hash((fstr, mc_val, d))}"
+        df["unique_key"] = df.apply(_uk_stable, axis=1)
     return df
 
 def build_suggestions_df(df, conn):
@@ -309,8 +315,11 @@ if uploaded is not None:
         help="Convierte todos los montos a negativos y marca tipo=Gasto; los ingresos los manejarás manualmente."
     )
     if force_all_gasto:
-        if "monto" in df_in.columns:
-            df_in["monto"] = -pd.to_numeric(df_in["monto"], errors="coerce").abs()
+        # usar monto_cartola como base inmutable; solo firmamos el signo visible
+        if "monto_cartola" in df_in.columns:
+            df_in["monto"] = -pd.to_numeric(df_in["monto_cartola"], errors="coerce").abs()
+        else:
+            df_in["monto"] = -pd.to_numeric(df_in.get("monto", 0), errors="coerce").abs()
         df_in["tipo"] = "Gasto"
         df_in["es_gasto"] = True
         df_in["es_transferencia_o_abono"] = False
@@ -345,24 +354,22 @@ if uploaded is not None:
     df_in["es_transferencia_o_abono"] = df_in["es_transferencia_o_abono"].astype(bool)
     df_in["es_compartido_posible"] = df_in["es_compartido_posible"].astype(bool)
 
-    # === Recalcular unique_key para alinear con la regla del backend (db.py):
-    #     clave = hash( fecha + monto_real (o abs(monto)) + detalle_norm )
-    def _uk_backend(row):
-        fecha = str(row.get("fecha", ""))
-        mr = row.get("monto_real", None)
-        try:
-            mr = float(mr)
-        except Exception:
-            mr = None
-        if mr is None or pd.isna(mr):
+    # Asegurar unique_key presente (si no vino en el CSV) usando monto_cartola
+    if "unique_key" not in df_in.columns:
+        def _uk_stable_ing(row):
+            f = row.get("fecha")
+            d = row.get("detalle_norm") or ""
+            mc = row.get("monto_cartola")
             try:
-                m = float(row.get("monto", 0))
-                mr = abs(m)
+                fstr = pd.to_datetime(f).strftime("%Y-%m-%d")
             except Exception:
-                mr = 0.0
-        detalle_norm = str(row.get("detalle_norm", ""))
-        return f"h:{hash((fecha, mr, detalle_norm))}"
-    df_in["unique_key"] = df_in.apply(_uk_backend, axis=1)
+                fstr = str(f)
+            try:
+                mc_val = float(mc)
+            except Exception:
+                mc_val = 0.0
+            return f"h:{hash((fstr, mc_val, d))}"
+        df_in["unique_key"] = df_in.apply(_uk_stable_ing, axis=1)
 
     # --- DEBUG de ingesta (previo a upsert) ---
     with st.expander("🔎 Debug de ingesta (previo a upsert)", expanded=False):
