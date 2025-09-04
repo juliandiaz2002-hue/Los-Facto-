@@ -338,12 +338,24 @@ def upsert_transactions(conn, df: pd.DataFrame) -> Tuple[int, int]:
         if isinstance(conn, dict) and conn.get("pg"):
             engine = conn["engine"]
             ignored = pd.read_sql_query("SELECT unique_key FROM movimientos_ignorados", engine)["unique_key"].tolist()
+            # ¿Está vacía la tabla de movimientos?
+            mov_count = pd.read_sql_query("SELECT COUNT(*) AS c FROM movimientos", engine)["c"].iloc[0]
         else:
             ignored = pd.read_sql_query("SELECT unique_key FROM movimientos_ignorados", conn)["unique_key"].tolist()
+            mov_count = pd.read_sql_query("SELECT COUNT(*) AS c FROM movimientos", conn)["c"].iloc[0]
     except Exception:
         ignored = []
+        mov_count = 0
+
+    # Si la base está vacía, solo honramos ignores de tipo "id:*" (provenientes de borrados manuales)
+    # para permitir la primera carga completa aunque existan claves k:* antiguas en movimientos_ignorados.
     if ignored:
-        df = df[~df["unique_key"].isin(set(ignored))]
+        if int(mov_count or 0) == 0:
+            effective_ignored = [k for k in ignored if str(k).startswith("id:")]
+        else:
+            effective_ignored = ignored
+        if effective_ignored:
+            df = df[~df["unique_key"].isin(set(effective_ignored))]
 
     cols = [
         "id",
