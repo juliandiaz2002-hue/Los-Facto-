@@ -31,31 +31,146 @@ st.title("Dashboard de Facto$")
 # Estilos ligeros (color primario en sidebar)
 st.markdown(
     """
-    <style>
-    :root { --facto-primary:#22c55e; }
-    /* Sidebar dark background */
-    section[data-testid="stSidebar"] > div { background-color: #0b1220 !important; }
-    /* Buttons keep primary color */
-    [data-testid="stSidebar"] .stButton > button { background-color: var(--facto-primary); color: white; border-color: var(--facto-primary); }
-    [data-testid="stSidebar"] .stMultiSelect [data-baseweb="tag"] { background-color: var(--facto-primary); }
-    [data-testid="stSidebar"] .stSelectbox > div > div { border-color: var(--facto-primary); }
-    /* Ensure text is readable in dark mode */
-    section[data-testid="stSidebar"] label,
-    section[data-testid="stSidebar"] span { color: #e5e7eb !important; }
-    /* Inputs/selects in sidebar */
-    section[data-testid="stSidebar"] input,
-    section[data-testid="stSidebar"] textarea,
-    section[data-testid="stSidebar"] div[role="combobox"],
-    section[data-testid="stSidebar"] select {
-      background-color: #111827 !important;
-      color: #e5e7eb !important;
-      border: 1px solid #334155 !important;
-    }
-    /* Slider track (if used) */
-    section[data-testid="stSidebar"] [data-baseweb="slider"] > div {
-      background: #1f2937 !important;
-    }
-    </style>
+<style>
+:root{
+  --facto-primary:#22c55e;
+  --facto-bg:#0b1220;
+  --facto-surface:#0f172a;
+  --facto-card:#111827;
+  --facto-border:#1f2937;
+  --facto-text:#e5e7eb;
+  --facto-muted:#9ca3af;
+}
+
+/* App background */
+[data-testid="stAppViewContainer"] > .main{
+  background-color: var(--facto-bg) !important;
+}
+
+/* Headings look & spacing */
+h1, h2, h3{
+  color: var(--facto-text) !important;
+  letter-spacing: .3px;
+}
+h1{ font-weight: 800; }
+h2{ margin-top: 1.25rem; font-weight: 700; }
+h3{ margin-top: 1rem; font-weight: 700; }
+
+/* Section dividers a bit subtler */
+hr{
+  border-color: var(--facto-border) !important;
+  opacity:.6;
+}
+
+/* Sidebar styling */
+section[data-testid="stSidebar"] > div{
+  background-color: var(--facto-surface) !important;
+}
+[data-testid="stSidebar"] label,
+[data-testid="stSidebar"] span{
+  color: var(--facto-text) !important;
+}
+section[data-testid="stSidebar"] input,
+section[data-testid="stSidebar"] textarea,
+section[data-testid="stSidebar"] div[role="combobox"],
+section[data-testid="stSidebar"] select{
+  background-color: var(--facto-card) !important;
+  color: var(--facto-text) !important;
+  border: 1px solid var(--facto-border) !important;
+}
+[data-testid="stSidebar"] .stButton > button{
+  background-color: var(--facto-primary) !important;
+  color: #0b1220 !important;
+  border: 1px solid var(--facto-primary) !important;
+  font-weight: 700;
+}
+[data-testid="stSidebar"] .stButton > button:hover{
+  filter: brightness(1.05);
+}
+[data-testid="stSidebar"] .stMultiSelect [data-baseweb="tag"]{
+  background-color: var(--facto-primary) !important;
+  color:#0b1220 !important;
+}
+section[data-testid="stSidebar"] [data-baseweb="slider"] > div{
+  background: #1f2937 !important;
+}
+
+/* Buttons (global) */
+.stButton > button{
+  background-color: var(--facto-primary) !important;
+  color: #0b1220 !important;
+  border: 1px solid var(--facto-primary) !important;
+  font-weight: 700;
+  border-radius: 10px;
+  transition: transform .06s ease, filter .15s ease;
+}
+.stButton > button:hover{ filter: brightness(1.06); }
+.stButton > button:active{ transform: translateY(1px); }
+
+/* Metrics -> turn them into subtle cards */
+div[data-testid="stMetric"]{
+  background: linear-gradient(180deg, rgba(34,197,94,.12), rgba(34,197,94,.0));
+  border: 1px solid var(--facto-border);
+  border-radius: 12px;
+  padding: 12px 14px;
+}
+div[data-testid="stMetric"] > label{
+  color: var(--facto-muted) !important;
+  font-weight: 600;
+}
+div[data-testid="stMetric"] [data-testid="stMetricDelta"]{
+  font-weight: 700;
+}
+
+/* Data editor / tables */
+[data-testid="stDataFrame"]{
+  border: 1px solid var(--facto-border);
+  border-radius: 12px;
+  overflow: hidden;
+}
+[data-testid="stDataFrame"] .stTable, 
+[data-testid="stDataFrame"] .stDataFrame{
+  background-color: var(--facto-card) !important;
+}
+[data-testid="stDataFrame"] th{
+  background-color: #0e1626 !important;
+  color: var(--facto-text) !important;
+  font-weight: 700 !important;
+  border-bottom: 1px solid var(--facto-border) !important;
+}
+[data-testid="stDataFrame"] td{
+  border-color: var(--facto-border) !important;
+}
+
+/* Expanders */
+details[data-testid="stExpander"]{
+  border: 1px solid var(--facto-border) !important;
+  border-radius: 12px !important;
+  background-color: var(--facto-card) !important;
+}
+details[data-testid="stExpander"] summary{
+  color: var(--facto-text) !important;
+  font-weight: 700 !important;
+}
+
+/* Messages (success/info/warn) harmonized */
+.stAlert{
+  border-radius: 12px;
+  border: 1px solid var(--facto-border);
+}
+
+/* Vega/Altair canvas spacing (subtle drop shadow) */
+.js-plotly-plot, .vega-embed{
+  filter: drop-shadow(0 6px 14px rgba(0,0,0,.25));
+}
+
+/* Inputs focus ring */
+input:focus, textarea:focus, select:focus{
+  outline: none !important;
+  box-shadow: 0 0 0 2px rgba(34,197,94,.35) !important;
+  border-color: var(--facto-primary) !important;
+}
+</style>
     """,
     unsafe_allow_html=True,
 )
