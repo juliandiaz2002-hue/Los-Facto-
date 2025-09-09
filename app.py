@@ -1415,20 +1415,43 @@ if st.button("Reparar montos"):
     except Exception as e:
         st.error(f"Error al reparar montos: {e}")
 
-# Panel para listar/restaurar "movimientos_ignorados"
 with st.expander("Movimientos ignorados"):
     try:
+        def _fetch_ignored_pg(engine):
+            # Discover available columns
+            with engine.connect() as cx:
+                cols = [r[0] for r in cx.execute(text("SELECT column_name FROM information_schema.columns WHERE table_name='movimientos_ignorados'")).fetchall()]
+            sel_cols = [c for c in ["id","unique_key","payload","created_at"] if c in cols]
+            if not sel_cols:
+                return pd.DataFrame()
+            q = f"SELECT {', '.join(sel_cols)} FROM movimientos_ignorados ORDER BY {('created_at' if 'created_at' in sel_cols else sel_cols[0])} DESC"
+            with engine.connect() as cx:
+                return pd.read_sql_query(text(q), cx)
+
+        def _fetch_ignored_sqlite(conn):
+            cols = pd.read_sql_query("PRAGMA table_info(movimientos_ignorados)", conn)["name"].tolist()
+            sel_cols = [c for c in ["id","unique_key","payload","created_at"] if c in cols]
+            if not sel_cols:
+                return pd.DataFrame()
+            order_col = "created_at" if "created_at" in sel_cols else sel_cols[0]
+            q = f"SELECT {', '.join(sel_cols)} FROM movimientos_ignorados ORDER BY {order_col} DESC"
+            return pd.read_sql_query(q, conn)
+
         if isinstance(conn, dict) and conn.get("pg"):
             engine = conn["engine"]
-            ignored_df = pd.read_sql_query("SELECT id, unique_key, payload, created_at FROM movimientos_ignorados ORDER BY created_at DESC", engine)
+            ignored_df = _fetch_ignored_pg(engine)
         else:
-            ignored_df = pd.read_sql_query("SELECT id, unique_key, payload, created_at FROM movimientos_ignorados ORDER BY created_at DESC", conn)
-        
+            ignored_df = _fetch_ignored_sqlite(conn)
+
         if not ignored_df.empty:
+            # Normalize missing columns for UI
+            for c in ["id","unique_key","payload","created_at"]:
+                if c not in ignored_df.columns:
+                    ignored_df[c] = None
             st.write(f"Total de movimientos ignorados: {len(ignored_df)}")
             st.dataframe(ignored_df[["id","unique_key","created_at"]], use_container_width=True, height=240)
 
-            sel_ids = st.multiselect("Selecciona IDs para reincorporar", ignored_df["id"].tolist())
+            sel_ids = st.multiselect("Selecciona IDs para reincorporar", [int(x) for x in ignored_df["id"].dropna().astype(int).tolist()])
             col_restore, col_restore_all, col_clear = st.columns(3)
 
             def _restore_rows(subdf):
@@ -1437,36 +1460,25 @@ with st.expander("Movimientos ignorados"):
                     engine = conn["engine"]
                     with engine.begin() as cx:
                         for _, rr in subdf.iterrows():
-                            uk = rr["unique_key"]
-                            payload = rr["payload"]
+                            uk = rr.get("unique_key")
+                            payload = rr.get("payload")
                             if not payload:
                                 continue
                             row = json.loads(payload)
-                            # Reinsertar: eliminar si existía y volver a insertar con payload
                             cx.execute(text("DELETE FROM movimientos WHERE unique_key = :uk"), {"uk": uk})
                             cx.execute(text(
                                 """
                                 INSERT INTO movimientos (unique_key, fecha, detalle, detalle_norm, monto, categoria, nota_usuario, monto_real, es_gasto, es_transferencia_o_abono)
                                 VALUES (:unique_key, :fecha, :detalle, :detalle_norm, :monto, :categoria, :nota_usuario, :monto_real, :es_gasto, :es_transferencia_o_abono)
                                 """
-                            ), {
-                                "unique_key": row.get("unique_key"),
-                                "fecha": row.get("fecha"),
-                                "detalle": row.get("detalle"),
-                                "detalle_norm": row.get("detalle_norm"),
-                                "monto": row.get("monto"),
-                                "categoria": row.get("categoria"),
-                                "nota_usuario": row.get("nota_usuario"),
-                                "monto_real": row.get("monto_real"),
-                                "es_gasto": row.get("es_gasto"),
-                                "es_transferencia_o_abono": row.get("es_transferencia_o_abono"),
-                            })
-                            cx.execute(text("DELETE FROM movimientos_ignorados WHERE id = :id"), {"id": int(rr["id"])})
-                            restored += 1
+                            ), row)
+                            if "id" in rr and pd.notna(rr["id"]):
+                                cx.execute(text("DELETE FROM movimientos_ignorados WHERE id = :id"), {"id": int(rr["id"])})
+                        restored += 1
                 else:
                     for _, rr in subdf.iterrows():
-                        uk = rr["unique_key"]
-                        payload = rr["payload"]
+                        uk = rr.get("unique_key")
+                        payload = rr.get("payload")
                         if not payload:
                             continue
                         row = json.loads(payload)
@@ -1482,14 +1494,15 @@ with st.expander("Movimientos ignorados"):
                                 row.get("es_gasto"), row.get("es_transferencia_o_abono"),
                             ),
                         )
-                        conn.execute("DELETE FROM movimientos_ignorados WHERE id = ?", (int(rr["id"]),))
+                        if "id" in rr and pd.notna(rr["id"]):
+                            conn.execute("DELETE FROM movimientos_ignorados WHERE id = ?", (int(rr["id"]),))
                         conn.commit()
                         restored += 1
                 return restored
 
             with col_restore:
                 if st.button("Reincorporar seleccionados") and sel_ids:
-                    sub = ignored_df[ignored_df["id"].isin(sel_ids)]
+                    sub = ignored_df[ignored_df["id"].astype("Int64").isin(sel_ids)]
                     restored = _restore_rows(sub)
                     st.success(f"Reincorporados {restored} movimientos.")
                     st.rerun()
