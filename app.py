@@ -1366,6 +1366,15 @@ if save_clicked:
     after_ids = set(after_df.get("id", pd.Series(dtype=float)).dropna().astype(int).astype(str)) if "id" in after_df.columns else set()
     to_delete_ids = [int(x) for x in (before_ids - after_ids)]
 
+    # --- DEBUG: mostrar qué se detectó para eliminar ---
+    with st.expander("🧹 Debug eliminación detectada", expanded=False):
+        st.write({
+            "to_delete_keys": to_delete_keys,
+            "to_delete_ids": to_delete_ids,
+            "before_count": len(before_df),
+            "after_count": len(after_df),
+        })
+
     # Resolver unique_keys desde IDs a eliminar (para tombstones)
     delete_uks_from_ids = []
     try:
@@ -1373,7 +1382,14 @@ if save_clicked:
             if isinstance(conn, dict) and conn.get("pg"):
                 engine = conn["engine"]
                 with engine.connect() as cx:
-                    res = pd.read_sql_query(text("SELECT unique_key FROM movimientos WHERE id = ANY(:ids)"), cx, params={"ids": to_delete_ids})
+                    _params = {}
+                    _ph = []
+                    for i, val in enumerate(to_delete_ids):
+                        k = f"id{i}"
+                        _params[k] = int(val)
+                        _ph.append(f":{k}")
+                    q = text(f"SELECT unique_key FROM movimientos WHERE id IN ({', '.join(_ph)})")
+                    res = pd.read_sql_query(q, cx, params=_params)
             else:
                 placeholders = ",".join(["?"] * len(to_delete_ids))
                 q = f"SELECT unique_key FROM movimientos WHERE id IN ({placeholders})"
@@ -1417,11 +1433,25 @@ if save_clicked:
                 engine = conn["engine"]
                 with engine.connect() as cx:
                     if to_delete_keys:
-                        rem_k = cx.execute(text("SELECT unique_key FROM movimientos WHERE unique_key = ANY(:uks)"), {"uks": to_delete_keys}).fetchall()
+                        _p = {}
+                        _ph = []
+                        for i, uk in enumerate(to_delete_keys):
+                            k = f"uk{i}"
+                            _p[k] = str(uk)
+                            _ph.append(f":{k}")
+                        qk = text(f"SELECT unique_key FROM movimientos WHERE unique_key IN ({', '.join(_ph)})")
+                        rem_k = cx.execute(qk, _p).fetchall()
                         remaining_uks = [r[0] for r in rem_k]
                         remaining_after += len(remaining_uks)
                     if to_delete_ids:
-                        rem_i = cx.execute(text("SELECT id FROM movimientos WHERE id = ANY(:ids)"), {"ids": to_delete_ids}).fetchall()
+                        _p2 = {}
+                        _ph2 = []
+                        for i, _id in enumerate(to_delete_ids):
+                            k = f"id{i}"
+                            _p2[k] = int(_id)
+                            _ph2.append(f":{k}")
+                        qi = text(f"SELECT id FROM movimientos WHERE id IN ({', '.join(_ph2)})")
+                        rem_i = cx.execute(qi, _p2).fetchall()
                         remaining_ids = [int(r[0]) for r in rem_i]
                         remaining_after += len(remaining_ids)
             else:
