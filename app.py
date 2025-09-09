@@ -1026,12 +1026,65 @@ if sel_mes and sel_mes != "Todos" and not df_base_compare.empty:
         )
         
         if not comparison_agg.empty:
-            chart_comparison = alt.Chart(comparison_agg).mark_bar().encode(
-                x=alt.X("categoria:N", title="Categoría"),
-                y=alt.Y("total:Q", title="Total", axis=alt.Axis(format=",.0f")),
-                color=alt.Color("mes:N", title="Mes"),
-                tooltip=["categoria:N", "mes:N", alt.Tooltip("total:Q", format=",.0f")],
-            ).properties(height=250)
+            # Ordenar categorías por el total del mes "Actual" (fallback al total global)
+            cat_order = (
+                comparison_agg[comparison_agg["mes"] == "Actual"]
+                .sort_values("total", ascending=False)["categoria"].tolist()
+            )
+            if not cat_order:
+                cat_order = (
+                    comparison_agg.groupby("categoria")["total"].sum()
+                    .sort_values(ascending=False).index.tolist()
+                )
+
+            bars = (
+                alt.Chart(comparison_agg)
+                .mark_bar()
+                .encode(
+                    x=alt.X(
+                        "categoria:N",
+                        title="Categoría",
+                        sort=cat_order,
+                        scale=alt.Scale(paddingInner=0.15, paddingOuter=0.05)
+                    ),
+                    xOffset=alt.XOffset("mes:N", scale=alt.Scale(domain=["Anterior", "Actual"])),
+                    y=alt.Y("total:Q", title="Total", axis=alt.Axis(format=",.0f")),
+                    color=alt.Color(
+                        "mes:N",
+                        title="Mes",
+                        scale=alt.Scale(domain=["Anterior", "Actual"]),
+                        legend=alt.Legend(orient="top")
+                    ),
+                    tooltip=[
+                        alt.Tooltip("categoria:N", title="Categoría"),
+                        alt.Tooltip("mes:N", title="Mes"),
+                        alt.Tooltip("total:Q", format=",.0f", title="Total"),
+                    ],
+                )
+            )
+
+            labels = (
+                alt.Chart(comparison_agg)
+                .mark_text(dy=-6)
+                .encode(
+                    x=alt.X(
+                        "categoria:N",
+                        sort=cat_order,
+                        scale=alt.Scale(paddingInner=0.15, paddingOuter=0.05)
+                    ),
+                    xOffset=alt.XOffset("mes:N", scale=alt.Scale(domain=["Anterior", "Actual"])),
+                    y=alt.Y("total:Q"),
+                    text=alt.Text("total:Q", format=",.0f"),
+                    color=alt.value("#e5e7eb")
+                )
+            )
+
+            chart_comparison = (
+                alt.layer(bars, labels)
+                .properties(height=280)
+                .configure_view(stroke=None)
+                .configure_axis(grid=False, labelAngle=-15)
+            )
             st.altair_chart(chart_comparison, use_container_width=True)
     except Exception as e:
         st.warning(f"No se pudo generar la comparación: {e}")
