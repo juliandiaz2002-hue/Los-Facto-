@@ -736,3 +736,124 @@ def apply_edits(conn, df_edits: pd.DataFrame) -> int:
     return updates
 
 
+# --- Tombstone-based delete API for compatibility with app.py ---
+def delete_transactions(conn, unique_keys: Optional[List[str]] = None, ids: Optional[List[int]] = None) -> int:
+    """
+    Delete rows from movimientos and record tombstones in movimientos_ignorados so
+    they are not reinserted on future CSV uploads.
+
+    Returns the count of deleted rows.
+    """
+    unique_keys = [str(u).strip() for u in (unique_keys or []) if str(u).strip() != ""]
+    ids = [int(i) for i in (ids or []) if i is not None]
+
+    # Nothing to do
+    if not unique_keys and not ids:
+        return 0
+
+    # --- Postgres path ---
+    if isinstance(conn, dict) and conn.get("pg") and text is not None:
+        engine = conn["engine"]
+        deleted = 0
+        with engine.begin() as e:
+            # If only IDs were provided, fetch the corresponding unique_keys to tombstone
+            fetched_uks = []
+            if ids:
+                # fetch unique_keys for ids that exist
+                rows = e.execute(text("SELECT id, unique_key FROM movimientos WHERE id = ANY(:ids)"),
+                                 {"ids": ids}).fetchall()
+                fetched_uks = [r[1] for r in rows if r[1]]
+
+            # Merge all unique_keys and de-duplicate
+            all_uks = list({*unique_keys, *fetched_uks})
+
+            # Tombstone: store unique_keys in movimientos_ignorados (payload optional)
+            if all_uks:
+                # Insert one by one to avoid expanding-in complications with text()
+                for uk in all_uks:
+                    e.execute(
+                        text("INSERT INTO movimientos_ignorados (unique_key) VALUES (:uk) ON CONFLICT (unique_key) DO NOTHING"),
+                        {"uk": uk},
+                    )
+
+            # Build delete conditions
+            # Prefer deleting by unique_key when available; also allow raw id deletion as fallback
+            if all_uks:
+                # delete by unique_key (batch)
+                # Use a temporary table approach for safety with text(); insert keys into VALUES list
+                # (small batches are expected; for many keys, app.py sends smaller chunks).
+                e.execute(
+                    text("""
+                        DELETE FROM movimientos
+                        WHERE unique_key = ANY(:uks)
+                    """),
+                    {"uks": all_uks},
+                )
+
+            if ids:
+                # Also delete any remaining rows by id (in case they lacked unique_key)
+                e.execute(
+                    text("DELETE FROM movimientos WHERE id = ANY(:ids)"),
+                    {"ids": ids},
+                )
+
+            # Report how many are gone now (best-effort)
+            # (We compute by counting matches that would be deleted)
+            # Note: rowcount on DELETE with ANY(...) may be supported; if not, fall back to re-count.
+            try:
+                # Try to approximate deleted count by summing what existed before.
+                cnt = 0
+                if all_uks:
+                    cnt += e.execute(text("SELECT COUNT(*) FROM movimientos WHERE unique_key = ANY(:uks)"), {"uks": all_uks}).scalar() or 0
+                if ids:
+                    cnt += e.execute(text("SELECT COUNT(*) FROM movimientos WHERE id = ANY(:ids)"), {"ids": ids}).scalar() or 0
+                deleted = int(cnt)
+            except Exception:
+                # If count-before fails, we won't block the operation; return 0 meaning unknown.
+                deleted = 0
+
+        return deleted
+
+    # --- SQLite path ---
+    deleted = 0
+    # If only IDs were provided, fetch their unique_keys for tombstones
+    fetched_uks = []
+    if ids:
+        rows = conn.execute(
+            f"SELECT id, unique_key FROM movimientos WHERE id IN ({','.join(['?']*len(ids))})",
+            ids,
+        ).fetchall()
+        fetched_uks = [r[1] for r in rows if r[1]]
+
+    all_uks = list({*unique_keys, *fetched_uks})
+
+    # Tombstone: insert unique_keys into movimientos_ignorados
+    for uk in all_uks:
+        try:
+            conn.execute(
+                "INSERT OR IGNORE INTO movimientos_ignorados (unique_key) VALUES (?)",
+                (uk,),
+            )
+        except Exception:
+            pass
+
+    # Delete by unique_key (if any)
+    if all_uks:
+        conn.execute(
+            f"DELETE FROM movimientos WHERE unique_key IN ({','.join(['?']*len(all_uks))})",
+            all_uks,
+        )
+        deleted += conn.total_changes  # best effort
+
+    # Delete by id as fallback (if any)
+    if ids:
+        conn.execute(
+            f"DELETE FROM movimientos WHERE id IN ({','.join(['?']*len(ids))})",
+            ids,
+        )
+        deleted += conn.total_changes  # best effort
+
+    conn.commit()
+    return deleted
+
+
