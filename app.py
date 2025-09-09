@@ -411,6 +411,32 @@ def build_suggestions_df(df, conn):
 conn = get_conn()
 init_db(conn)
 
+# === Garantizar tabla de tombstones para evitar "resurrecciones" ===
+try:
+    if isinstance(conn, dict) and conn.get("pg"):
+        engine = conn["engine"]
+        with engine.begin() as cx:
+            cx.execute(text(
+                """
+                CREATE TABLE IF NOT EXISTS movimientos_borrados (
+                    unique_key TEXT PRIMARY KEY,
+                    deleted_at TIMESTAMPTZ DEFAULT NOW()
+                )
+                """
+            ))
+    else:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS movimientos_borrados (
+                unique_key TEXT PRIMARY KEY,
+                deleted_at TEXT DEFAULT (datetime('now'))
+            )
+            """
+        )
+        conn.commit()
+except Exception as _tb_e:
+    st.caption(f"(No se pudo garantizar tabla de tombstones: {_tb_e})")
+
 # Cargar/sembrar categorías
 categories = get_categories(conn)
 if not categories:
@@ -566,6 +592,26 @@ if uploaded is not None:
             st.json(sample_payload)
         except Exception as _dbg2_e:
             st.info(f"Debug de payload no disponible: {type(_dbg2_e).__name__}: {_dbg2_e}")
+
+    # --- Filtrar transacciones previamente borradas (tombstones) ---
+    try:
+        tomb_uks = set()
+        if isinstance(conn, dict) and conn.get("pg"):
+            engine = conn["engine"]
+            with engine.connect() as cx:
+                tdf = pd.read_sql_query(text("SELECT unique_key FROM movimientos_borrados"), cx)
+        else:
+            tdf = pd.read_sql_query("SELECT unique_key FROM movimientos_borrados", conn)
+        if tdf is not None and not tdf.empty:
+            tomb_uks = set(tdf["unique_key"].astype(str).tolist())
+        before_len = len(df_in)
+        if "unique_key" in df_in.columns and tomb_uks:
+            df_in = df_in[~df_in["unique_key"].astype(str).isin(tomb_uks)].copy()
+            skipped = before_len - len(df_in)
+            if skipped > 0:
+                st.info(f"⛔ {skipped} fila(s) del CSV fueron omitidas porque sus unique_key están marcadas como borradas.")
+    except Exception as _tbe:
+        st.caption(f"(No se pudo aplicar filtro de tombstones: {_tbe})")
 
     inserted, ignored = upsert_transactions(conn, df_in)
     st.success(f"Ingeridos: {inserted} nuevas filas, ignoradas por duplicado: {ignored}")
@@ -1320,6 +1366,25 @@ if save_clicked:
     after_ids = set(after_df.get("id", pd.Series(dtype=float)).dropna().astype(int).astype(str)) if "id" in after_df.columns else set()
     to_delete_ids = [int(x) for x in (before_ids - after_ids)]
 
+    # Resolver unique_keys desde IDs a eliminar (para tombstones)
+    delete_uks_from_ids = []
+    try:
+        if to_delete_ids:
+            if isinstance(conn, dict) and conn.get("pg"):
+                engine = conn["engine"]
+                with engine.connect() as cx:
+                    res = pd.read_sql_query(text("SELECT unique_key FROM movimientos WHERE id = ANY(:ids)"), cx, params={"ids": to_delete_ids})
+            else:
+                placeholders = ",".join(["?"] * len(to_delete_ids))
+                q = f"SELECT unique_key FROM movimientos WHERE id IN ({placeholders})"
+                res = pd.read_sql_query(q, conn, params=to_delete_ids)
+            if res is not None and not res.empty:
+                delete_uks_from_ids = res["unique_key"].dropna().astype(str).tolist()
+    except Exception as _rid_e:
+        st.caption(f"(No se pudieron resolver unique_keys por id: {_rid_e})")
+
+    all_uks_to_tomb = sorted(set([*(to_delete_keys or []), *delete_uks_from_ids]))
+
     # Preparar ediciones: solo filas con unique_key (ignoramos filas nuevas)
     edits = editable.dropna(subset=["unique_key"]).copy()
     edits.rename(columns={"monto": "monto_real"}, inplace=True)
@@ -1331,10 +1396,85 @@ if save_clicked:
             st.info(f"Aprendidas {learned} reglas de categoría por 'detalle_norm'. Se aplicarán en futuras cargas.")
     except Exception:
         pass
+
+    # --- Eliminación persistente con verificación inmediata ---
+    expected_to_delete = (len(to_delete_keys) if to_delete_keys else 0) + (len(to_delete_ids) if to_delete_ids else 0)
     deleted = 0
     if to_delete_keys or to_delete_ids:
-        deleted = delete_transactions(conn, unique_keys=to_delete_keys or None, ids=to_delete_ids or None)
-    st.success(f"Actualizadas {updated} filas. Eliminadas {deleted} filas.")
+        try:
+            deleted = delete_transactions(conn, unique_keys=to_delete_keys or None, ids=to_delete_ids or None)
+        except Exception as e:
+            st.error(f"Error al eliminar filas: {e}")
+            deleted = 0
+
+        # Verificar que no queden remanentes en DB (post-delete)
+        remaining_after = 0
+        remaining_uks = []
+        remaining_ids = []
+
+        try:
+            if isinstance(conn, dict) and conn.get("pg"):
+                engine = conn["engine"]
+                with engine.connect() as cx:
+                    if to_delete_keys:
+                        rem_k = cx.execute(text("SELECT unique_key FROM movimientos WHERE unique_key = ANY(:uks)"), {"uks": to_delete_keys}).fetchall()
+                        remaining_uks = [r[0] for r in rem_k]
+                        remaining_after += len(remaining_uks)
+                    if to_delete_ids:
+                        rem_i = cx.execute(text("SELECT id FROM movimientos WHERE id = ANY(:ids)"), {"ids": to_delete_ids}).fetchall()
+                        remaining_ids = [int(r[0]) for r in rem_i]
+                        remaining_after += len(remaining_ids)
+            else:
+                if to_delete_keys:
+                    placeholders = ",".join(["?"] * len(to_delete_keys))
+                    q = f"SELECT unique_key FROM movimientos WHERE unique_key IN ({placeholders})"
+                    rem_k = pd.read_sql_query(q, conn, params=to_delete_keys)
+                    remaining_uks = rem_k["unique_key"].astype(str).tolist()
+                    remaining_after += len(remaining_uks)
+                if to_delete_ids:
+                    placeholders = ",".join(["?"] * len(to_delete_ids))
+                    q = f"SELECT id FROM movimientos WHERE id IN ({placeholders})"
+                    rem_i = pd.read_sql_query(q, conn, params=to_delete_ids)
+                    remaining_ids = rem_i["id"].astype(int).tolist()
+                    remaining_after += len(remaining_ids)
+        except Exception as ve:
+            st.info(f"No se pudo verificar la eliminación: {ve}")
+
+        # Mensajería según resultado
+        if expected_to_delete > 0 and deleted == 0 and remaining_after > 0:
+            st.warning(f"⚠️ Se intentó eliminar {expected_to_delete} fila(s), pero la base reporta {remaining_after} restante(s).")
+            if remaining_uks:
+                st.caption("Unique keys aún presentes:")
+                st.code(", ".join(map(str, remaining_uks)), language=None)
+            if remaining_ids:
+                st.caption("IDs aún presentes:")
+                st.code(", ".join(map(str, remaining_ids)), language=None)
+        elif expected_to_delete > deleted:
+            st.info(f"Eliminadas {deleted} de {expected_to_delete} fila(s) solicitadas.")
+        else:
+            st.success(f"Eliminadas {deleted} fila(s).")
+
+        # Registrar tombstones para evitar reingesta futura de estas unique_keys
+        try:
+            if deleted > 0 and all_uks_to_tomb:
+                if isinstance(conn, dict) and conn.get("pg"):
+                    engine = conn["engine"]
+                    with engine.begin() as cx:
+                        for uk in all_uks_to_tomb:
+                            cx.execute(text("INSERT INTO movimientos_borrados (unique_key) VALUES (:uk) ON CONFLICT (unique_key) DO NOTHING"), {"uk": uk})
+                else:
+                    for uk in all_uks_to_tomb:
+                        try:
+                            conn.execute("INSERT OR IGNORE INTO movimientos_borrados (unique_key) VALUES (?)", (uk,))
+                        except Exception:
+                            pass
+                    conn.commit()
+                st.caption(f"(Marcadas {len(all_uks_to_tomb)} unique_key como tombstones)")
+        except Exception as _tbw:
+            st.caption(f"(No se pudieron registrar tombstones: {_tbw})")
+    else:
+        st.success(f"Actualizadas {updated} filas. (No se detectaron eliminaciones)")
+
     st.rerun()
 
 if download_clicked:
