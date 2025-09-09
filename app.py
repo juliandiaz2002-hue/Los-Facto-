@@ -1448,8 +1448,44 @@ with st.expander("Movimientos ignorados"):
             for c in ["id","unique_key","payload","created_at"]:
                 if c not in ignored_df.columns:
                     ignored_df[c] = None
+
+            # Parsear payload para mostrar nombre (detalle) y monto en la grilla
+            def _parse_payload_to_cols(_df: pd.DataFrame) -> pd.DataFrame:
+                if _df is None or _df.empty:
+                    return _df
+                nombres, montos = [], []
+                for _, r in _df.iterrows():
+                    raw = r.get("payload")
+                    try:
+                        obj = json.loads(raw) if raw else {}
+                    except Exception:
+                        obj = {}
+                    # nombre: preferir 'detalle', luego 'detalle_norm'
+                    nombre = obj.get("detalle") or obj.get("detalle_norm") or ""
+                    # monto: preferir monto_real > 0, luego 'monto'
+                    m = obj.get("monto_real")
+                    if m in (None, "", 0):
+                        m = obj.get("monto")
+                    try:
+                        # tolerar coma decimal
+                        m = float(str(m).replace(",", ".")) if m is not None else None
+                    except Exception:
+                        m = None
+                    nombres.append(nombre)
+                    montos.append(m)
+                _df["nombre"] = nombres
+                _df["monto"] = montos
+                return _df
+
+            # Enriquecer ignored_df con nombre y monto
+            ignored_df = _parse_payload_to_cols(ignored_df)
+
             st.write(f"Total de movimientos ignorados: {len(ignored_df)}")
-            st.dataframe(ignored_df[["id","unique_key","created_at"]], use_container_width=True, height=240)
+            st.dataframe(
+                ignored_df[[c for c in ["id", "created_at", "nombre", "monto", "unique_key"] if c in ignored_df.columns]],
+                use_container_width=True,
+                height=280
+            )
 
             sel_ids = st.multiselect("Selecciona IDs para reincorporar", [int(x) for x in ignored_df["id"].dropna().astype(int).tolist()])
             col_restore, col_restore_all, col_clear = st.columns(3)
