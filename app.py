@@ -600,6 +600,7 @@ with st.sidebar:
     df_months["mes"] = df_months["fecha"].dt.to_period("M").astype(str)
     months = sorted([m for m in df_months["mes"].dropna().unique().tolist()])
     sel_mes = st.selectbox("Mes", options=["Todos"] + months, index=0)
+    st.caption("Si eliges un **Mes**, solo la vista principal se filtra a ese mes. La comparación mensual usa el set completo (o el rango de fechas si lo defines abajo).")
     min_fecha, max_fecha = df["fecha"].min(), df["fecha"].max()
     if pd.isna(min_fecha) or pd.isna(max_fecha):
         rango = None
@@ -608,12 +609,6 @@ with st.sidebar:
             "Rango de fechas",
             (min_fecha.date(), max_fecha.date()),
         )
-    view_mode = st.radio(
-    "Mostrar",
-    ["Gastos", "Abonos", "Ambos"],
-    index=0,
-    horizontal=True
-)
     st.divider()
     with st.expander("Gestionar categorías"):
         st.caption("Puedes eliminar o agregar categorías. Se guardan en la base.")
@@ -653,58 +648,69 @@ with st.sidebar:
             st.rerun()
 
 
-# Preparar base de trabajo
-dfv = df.copy()
+# Preparar bases de trabajo
+dfv = df.copy()               # vista principal/editable
+df_base_compare = df.copy()   # base para comparación (no aplica filtro por mes)
+
 # Asegurar tipo numérico en monto para evitar NaNs o strings
 if "monto" in dfv.columns:
     dfv["monto"] = pd.to_numeric(dfv["monto"], errors="coerce").fillna(0)
+if "monto" in df_base_compare.columns:
+    df_base_compare["monto"] = pd.to_numeric(df_base_compare["monto"], errors="coerce").fillna(0)
 
-# Determinar tipo con prioridad:
-# 1) 'tipo' si existe
-# 2) flags booleanos si existen: 'es_gasto' o 'es_transferencia_o_abono'
-# 3) signo de 'monto' (negativo=gasto, positivo=abono) + fallback si todo es >= 0
+# Determinar tipo con prioridad (solo interpretativo; no filtramos por tipo en UI)
 if "tipo" in dfv.columns:
     dfv["tipo_calc"] = dfv["tipo"].astype(str)
+    df_base_compare["tipo_calc"] = df_base_compare["tipo"].astype(str)
 elif "es_gasto" in dfv.columns:
     tmp = dfv["es_gasto"].astype(str).str.lower()
     dfv["tipo_calc"] = np.where(tmp.isin(["1","true","t","si","sí","y"]), "Gasto", "Abono")
+    tmp2 = df_base_compare["es_gasto"].astype(str).str.lower()
+    df_base_compare["tipo_calc"] = np.where(tmp2.isin(["1","true","t","si","sí","y"]), "Gasto", "Abono")
 elif "es_transferencia_o_abono" in dfv.columns:
     tmp = dfv["es_transferencia_o_abono"].astype(str).str.lower()
     dfv["tipo_calc"] = np.where(tmp.isin(["1","true","t","si","sí","y"]), "Abono", "Gasto")
+    tmp2 = df_base_compare["es_transferencia_o_abono"].astype(str).str.lower()
+    df_base_compare["tipo_calc"] = np.where(tmp2.isin(["1","true","t","si","sí","y"]), "Abono", "Gasto")
 else:
     dfv["tipo_calc"] = np.where(dfv["monto"] < 0, "Gasto", np.where(dfv["monto"] > 0, "Abono", "Cero"))
+    df_base_compare["tipo_calc"] = np.where(df_base_compare["monto"] < 0, "Gasto", np.where(df_base_compare["monto"] > 0, "Abono", "Cero"))
     # Fallback para CSV enriquecido re-importado (montos positivos, sin columna 'tipo')
     if not (dfv["tipo_calc"] == "Gasto").any() and (dfv["monto"] >= 0).all():
         dfv["tipo_calc"] = "Gasto"
+    if not (df_base_compare["tipo_calc"] == "Gasto").any() and (df_base_compare["monto"] >= 0).all():
+        df_base_compare["tipo_calc"] = "Gasto"
+
+# Texto libre
 if q:
     dfv = dfv[dfv["detalle_norm"].str.contains(q, case=False, na=False)]
+    df_base_compare = df_base_compare[df_base_compare["detalle_norm"].str.contains(q, case=False, na=False)]
+
+# Rango de fechas (si el usuario lo define) → afecta TODO: vista y comparación
+if isinstance(rango, tuple) and len(rango) == 2:
+    dfv = dfv[(dfv["fecha"] >= pd.to_datetime(rango[0])) & (dfv["fecha"] <= pd.to_datetime(rango[1]))]
+    df_base_compare = df_base_compare[(df_base_compare["fecha"] >= pd.to_datetime(rango[0])) & (df_base_compare["fecha"] <= pd.to_datetime(rango[1]))]
+elif rango:
+    dfv = dfv[dfv["fecha"].dt.date == rango]
+    df_base_compare = df_base_compare[df_base_compare["fecha"].dt.date == rango]
+
+# Filtro por mes (solo para la VISTA principal; NO afecta comparación)
 if sel_mes and sel_mes != "Todos":
     y, m = sel_mes.split("-")
     start = pd.to_datetime(f"{y}-{m}-01")
     end = start + pd.offsets.MonthEnd(1)
     dfv = dfv[(dfv["fecha"] >= start) & (dfv["fecha"] <= end)]
-elif isinstance(rango, tuple) and len(rango) == 2:
-    dfv = dfv[(dfv["fecha"] >= pd.to_datetime(rango[0])) & (dfv["fecha"] <= pd.to_datetime(rango[1]))]
-elif rango:
-    dfv = dfv[dfv["fecha"].dt.date == rango]
 
-# Tipo final y monto para mostrar
+# Tipo final y monto para mostrar (sin filtro por tipo)
 dfv["tipo"] = dfv["tipo_calc"]
 dfv["monto_cartola"] = dfv["monto"].abs()
-
-# Filtrado por tipo según selección del usuario
-if view_mode == "Gastos":
-    dfv = dfv[dfv["tipo"] == "Gasto"].copy()
-elif view_mode == "Abonos":
-    dfv = dfv[dfv["tipo"] == "Abono"].copy()
-else:
-    dfv = dfv.copy()  # Ambos
 
 # Filtro por categoría (para acompañar interacción del gráfico)
 cat_options = sorted([c for c in categories if c])
 sel_cats = st.sidebar.multiselect("Categorías", options=["Todas"] + cat_options, default=["Todas"])
 if sel_cats and "Todas" not in sel_cats:
     dfv = dfv[dfv["categoria"].isin(sel_cats)]
+    df_base_compare = df_base_compare[df_base_compare["categoria"].isin(sel_cats)]
 
 # Construir df para gráficos, aplicando borradores de edición (sin necesidad de guardar)
 draft_key = "draft_table_v1"
@@ -990,7 +996,7 @@ if not df_plot.empty:
     st.altair_chart(chart_avg, use_container_width=True)
 
 # Comparación mes seleccionado vs anterior
-if sel_mes and sel_mes != "Todos" and not df_plot.empty:
+if sel_mes and sel_mes != "Todos" and not df_base_compare.empty:
     st.markdown("### Comparación mes seleccionado vs anterior")
     try:
         y, m = sel_mes.split("-")
@@ -1001,12 +1007,12 @@ if sel_mes and sel_mes != "Todos" and not df_plot.empty:
         prev_start = current_start - pd.offsets.MonthBegin(1)
         prev_end = current_start - pd.offsets.Day(1)
         
-        # Datos del mes actual
-        current_data = df_plot[(df_plot["fecha"] >= current_start) & (df_plot["fecha"] <= current_end)].copy()
+        # Datos del mes actual (usando df_base_compare)
+        current_data = df_base_compare[(df_base_compare["fecha"] >= current_start) & (df_base_compare["fecha"] <= current_end)].copy()
         current_data["mes"] = "Actual"
         
-        # Datos del mes anterior
-        prev_data = df_plot[(df_plot["fecha"] >= prev_start) & (df_plot["fecha"] <= prev_end)].copy()
+        # Datos del mes anterior (usando df_base_compare)
+        prev_data = df_base_compare[(df_base_compare["fecha"] >= prev_start) & (df_base_compare["fecha"] <= prev_end)].copy()
         prev_data["mes"] = "Anterior"
         
         # Combinar y agregar por categoría y mes
@@ -1166,6 +1172,34 @@ if draft_key in st.session_state:
             if col in base.columns and col in dset.columns:
                 base[col] = dset[col].reindex(base.index)
         df_table = base.reset_index()
+
+# Controles de ordenamiento (click-en-header aún no es fiable en st.data_editor)
+sort_candidates = ["fecha", "monto", "categoria", "detalle", "id"]
+sort_cols = [c for c in sort_candidates if c in df_table.columns]
+
+if sort_cols:
+    col_sort1, col_sort2 = st.columns([2, 1])
+    with col_sort1:
+        sort_by = st.selectbox(
+            "Ordenar por",
+            options=sort_cols,
+            index=0,
+            help="Ordena la tabla antes de editar"
+        )
+    with col_sort2:
+        sort_desc = st.toggle("Descendente", value=True)
+
+    # Aplicar orden de manera estable (para que no 'salten' filas al editar)
+    if sort_by == "fecha":
+        # asegurar tipo datetime para orden correcto
+        _tmp = pd.to_datetime(df_table["fecha"], errors="coerce")
+        df_table = df_table.assign(_f=_tmp).sort_values(by="_f", ascending=not sort_desc, kind="mergesort").drop(columns="_f")
+    elif sort_by == "monto":
+        # ordenar usando valor numérico seguro
+        _m = pd.to_numeric(df_table["monto"], errors="coerce")
+        df_table = df_table.assign(_m=_m).sort_values(by="_m", ascending=not sort_desc, kind="mergesort").drop(columns="_m")
+    else:
+        df_table = df_table.sort_values(by=sort_by, ascending=not sort_desc, kind="mergesort")
 
 # Formulario de edición mejorado
 with st.form("editor_form", clear_on_submit=False):
