@@ -759,58 +759,58 @@ def delete_transactions(conn, unique_keys: Optional[List[str]] = None, ids: Opti
             # If only IDs were provided, fetch the corresponding unique_keys to tombstone
             fetched_uks = []
             if ids:
-                # fetch unique_keys for ids that exist
-                rows = e.execute(text("SELECT id, unique_key FROM movimientos WHERE id = ANY(:ids)"),
-                                 {"ids": ids}).fetchall()
-                fetched_uks = [r[1] for r in rows if r[1]]
+                # Build dynamic param list for ids fetch
+                id_params = {}
+                id_placeholders = []
+                for idx, i in enumerate(ids):
+                    key = f"id{idx}"
+                    id_params[key] = int(i)
+                    id_placeholders.append(f":{key}")
+                if id_placeholders:
+                    rows = e.execute(
+                        text(f"SELECT id, unique_key FROM movimientos WHERE id IN ({', '.join(id_placeholders)})"),
+                        id_params
+                    ).fetchall()
+                    fetched_uks = [r[1] for r in rows if r[1]]
 
             # Merge all unique_keys and de-duplicate
             all_uks = list({*unique_keys, *fetched_uks})
 
             # Tombstone: store unique_keys in movimientos_ignorados (payload optional)
             if all_uks:
-                # Insert one by one to avoid expanding-in complications with text()
                 for uk in all_uks:
                     e.execute(
                         text("INSERT INTO movimientos_ignorados (unique_key) VALUES (:uk) ON CONFLICT (unique_key) DO NOTHING"),
                         {"uk": uk},
                     )
 
-            # Build delete conditions
-            # Prefer deleting by unique_key when available; also allow raw id deletion as fallback
+            # Delete by unique_key (batch) with dynamic expansion
             if all_uks:
-                # delete by unique_key (batch)
-                # Use a temporary table approach for safety with text(); insert keys into VALUES list
-                # (small batches are expected; for many keys, app.py sends smaller chunks).
-                e.execute(
-                    text("""
-                        DELETE FROM movimientos
-                        WHERE unique_key = ANY(:uks)
-                    """),
-                    {"uks": all_uks},
+                uk_params = {}
+                uk_placeholders = []
+                for idx, uk in enumerate(all_uks):
+                    key = f"uk{idx}"
+                    uk_params[key] = uk
+                    uk_placeholders.append(f":{key}")
+                res1 = e.execute(
+                    text(f"DELETE FROM movimientos WHERE unique_key IN ({', '.join(uk_placeholders)})"),
+                    uk_params
                 )
+                deleted += int(res1.rowcount or 0)
 
+            # Also delete by id (in case they lacked unique_key)
             if ids:
-                # Also delete any remaining rows by id (in case they lacked unique_key)
-                e.execute(
-                    text("DELETE FROM movimientos WHERE id = ANY(:ids)"),
-                    {"ids": ids},
+                id_params = {}
+                id_placeholders = []
+                for idx, i in enumerate(ids):
+                    key = f"id_del{idx}"
+                    id_params[key] = int(i)
+                    id_placeholders.append(f":{key}")
+                res2 = e.execute(
+                    text(f"DELETE FROM movimientos WHERE id IN ({', '.join(id_placeholders)})"),
+                    id_params
                 )
-
-            # Report how many are gone now (best-effort)
-            # (We compute by counting matches that would be deleted)
-            # Note: rowcount on DELETE with ANY(...) may be supported; if not, fall back to re-count.
-            try:
-                # Try to approximate deleted count by summing what existed before.
-                cnt = 0
-                if all_uks:
-                    cnt += e.execute(text("SELECT COUNT(*) FROM movimientos WHERE unique_key = ANY(:uks)"), {"uks": all_uks}).scalar() or 0
-                if ids:
-                    cnt += e.execute(text("SELECT COUNT(*) FROM movimientos WHERE id = ANY(:ids)"), {"ids": ids}).scalar() or 0
-                deleted = int(cnt)
-            except Exception:
-                # If count-before fails, we won't block the operation; return 0 meaning unknown.
-                deleted = 0
+                deleted += int(res2.rowcount or 0)
 
         return deleted
 
