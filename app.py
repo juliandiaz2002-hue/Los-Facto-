@@ -1477,7 +1477,7 @@ if save_clicked:
     except Exception:
         pass
 
-    # --- DEBUG: mostrar qué se detectó para eliminar ---
+    # --- DEBUG: mostrar qué se detectó para elimin ---
     with st.expander("🧹 Debug eliminación detectada", expanded=False):
         st.write({
             "to_delete_keys": to_delete_keys,
