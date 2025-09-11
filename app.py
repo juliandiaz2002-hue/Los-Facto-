@@ -1355,6 +1355,89 @@ with st.form("editor_form", clear_on_submit=False):
         elif download_clicked:
             st.info("📤 Preparando descarga...")
 
+# --- Eliminación rápida por selección explícita ---
+with st.expander("🗑️ Eliminar filas (selección explícita)"):
+    # Construir etiquetas legibles para elegir filas a borrar
+    _del_source = df_table.copy()
+    def _fmt_row(r):
+        _id = int(r["id"]) if "id" in _del_source.columns and pd.notna(r.get("id")) else None
+        _f = r.get("fecha")
+        try:
+            _f = pd.to_datetime(_f).strftime("%Y-%m-%d")
+        except Exception:
+            _f = str(_f)
+        _d = str(r.get("detalle",""))[:50]
+        _m = pd.to_numeric(r.get("monto"), errors="coerce")
+        _m = float(_m) if pd.notna(_m) else 0.0
+        _uk = r.get("unique_key","")
+        return f"[{_id}] {_f} · {_d} · ${_m:,.0f} · {_uk}"
+    _del_source["__label"] = _del_source.apply(_fmt_row, axis=1)
+    _choices = _del_source["__label"].tolist()
+    sel_rows_labels = st.multiselect("Elige filas a eliminar", _choices, key="quick_delete_choices")
+
+    if st.button("Eliminar seleccionadas", key="quick_delete_button"):
+        _to_del = _del_source[_del_source["__label"].isin(sel_rows_labels)]
+        del_ids = _to_del["id"].dropna().astype(int).tolist() if "id" in _to_del.columns else []
+        del_uks = _to_del["unique_key"].dropna().astype(str).tolist() if "unique_key" in _to_del.columns else []
+
+        # Ejecutar borrado usando helper de DB
+        deleted_q = 0
+        try:
+            deleted_q = delete_transactions(conn, unique_keys=(del_uks or None), ids=(del_ids or None))
+        except Exception as e:
+            st.error(f"Error al eliminar: {e}")
+            deleted_q = 0
+
+        # Tombstones para evitar reingesta futura
+        try:
+            if deleted_q > 0 and (del_uks or del_ids):
+                _uks_to_tomb = set(del_uks)
+
+                # Resolver UKs desde IDs si hiciera falta
+                if del_ids:
+                    try:
+                        if isinstance(conn, dict) and conn.get("pg"):
+                            engine = conn["engine"]
+                            with engine.connect() as cx:
+                                _p = {}
+                                _ph = []
+                                for i, val in enumerate(del_ids):
+                                    k = f"id{i}"
+                                    _p[k] = int(val)
+                                    _ph.append(f":{k}")
+                                q = text(f"SELECT unique_key FROM movimientos WHERE id IN ({', '.join(_ph)})")
+                                res = pd.read_sql_query(q, cx, params=_p)
+                        else:
+                            placeholders = ",".join(["?"] * len(del_ids))
+                            q = f"SELECT unique_key FROM movimientos WHERE id IN ({placeholders})"
+                            res = pd.read_sql_query(q, conn, params=del_ids)
+                        if res is not None and not res.empty:
+                            _uks_to_tomb.update(res["unique_key"].dropna().astype(str).tolist())
+                    except Exception:
+                        pass
+
+                # Insertar tombstones
+                if isinstance(conn, dict) and conn.get("pg"):
+                    engine = conn["engine"]
+                    with engine.begin() as cx:
+                        for uk in _uks_to_tomb:
+                            cx.execute(text("INSERT INTO movimientos_borrados (unique_key) VALUES (:uk) ON CONFLICT (unique_key) DO NOTHING"), {"uk": uk})
+                else:
+                    for uk in _uks_to_tomb:
+                        try:
+                            conn.execute("INSERT OR IGNORE INTO movimientos_borrados (unique_key) VALUES (?)", (uk,))
+                        except Exception:
+                            pass
+                    conn.commit()
+        except Exception as _te:
+            st.caption(f"(No se pudieron registrar tombstones: {_te})")
+
+        if deleted_q > 0:
+            st.success(f"Eliminadas {deleted_q} fila(s).")
+        else:
+            st.info("No se eliminaron filas.")
+        st.rerun()
+
 if save_clicked:
     # Detectar eliminadas con anti-join por unique_key y por id
     before_df = df_table[[c for c in ["unique_key","id"] if c in df_table.columns]].copy()
