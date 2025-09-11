@@ -1257,6 +1257,12 @@ else:
 
 df_table_cols = [c for c in existing_cols if c in df_view.columns]
 df_table = df_view[df_table_cols].copy()
+# === Inline delete checkbox (solo UI, sin lógica aún) ===
+if "eliminar" not in df_table.columns:
+    df_table["eliminar"] = False
+# mover la columna al frente para mejor UX
+_cols_order = ["eliminar"] + [c for c in df_table.columns if c != "eliminar"]
+df_table = df_table[_cols_order]
 
 # Mantener cambios no guardados entre reruns (por gestión de categorías, etc.)
 draft_key = "draft_table_v1"
@@ -1330,6 +1336,11 @@ with st.form("editor_form", clear_on_submit=False):
             "unique_key": st.column_config.TextColumn(
                 disabled=True,
                 help="Identificador único (no editable)"
+            ),
+            "eliminar": st.column_config.CheckboxColumn(
+                label="Eliminar",
+                help="Marca para borrar esta fila",
+                default=False,
             ),
         },
         hide_index=True,
@@ -1448,6 +1459,23 @@ if save_clicked:
     before_ids = set(before_df.get("id", pd.Series(dtype=float)).dropna().astype(int).astype(str)) if "id" in before_df.columns else set()
     after_ids = set(after_df.get("id", pd.Series(dtype=float)).dropna().astype(int).astype(str)) if "id" in after_df.columns else set()
     to_delete_ids = [int(x) for x in (before_ids - after_ids)]
+
+    # --- Capturar filas marcadas con la casilla "eliminar" y limpiar la columna antes de guardar ---
+    try:
+        if "eliminar" in editable.columns:
+            _marked = editable[editable["eliminar"] == True]
+            if not _marked.empty:
+                if "unique_key" in _marked.columns:
+                    to_delete_keys = list(set(to_delete_keys) | set(_marked["unique_key"].dropna().astype(str).tolist()))
+                if "id" in _marked.columns:
+                    try:
+                        to_delete_ids = list(sorted(set(to_delete_ids) | set(_marked["id"].dropna().astype(int).tolist())))
+                    except Exception:
+                        pass
+            # Eliminar la columna de control para no romper apply_edits / inserts
+            editable = editable.drop(columns=["eliminar"], errors="ignore")
+    except Exception:
+        pass
 
     # --- DEBUG: mostrar qué se detectó para eliminar ---
     with st.expander("🧹 Debug eliminación detectada", expanded=False):
