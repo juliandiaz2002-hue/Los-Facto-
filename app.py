@@ -1628,6 +1628,100 @@ if download_clicked:
 
 ## Eliminación ahora se maneja directamente quitando filas en la tabla (num_rows="dynamic")
 
+# === Agregar gasto manual (no reinsertable por CSV) ===
+with st.expander("➕ Agregar gasto manual"):
+    st.caption("Usa esto cuando pagaste por otros o quieres registrar solo tu parte real. El movimiento original puedes eliminarlo con la casilla **Eliminar**; al subir nuevos CSV no volverá por el tombstone. Este manual queda en la BD como gasto propio.")
+
+    colm1, colm2 = st.columns([1,1])
+    with colm1:
+        fecha_man = st.date_input("Fecha", value=pd.Timestamp.today().date())
+        detalle_man = st.text_input("Detalle", value="")
+        monto_man = st.number_input(
+            "Monto real (tu parte)",
+            min_value=0.0, step=1000.0, value=0.0,
+            help="Ingresa el monto que realmente te corresponde (positivo)"
+        )
+    with colm2:
+        cat_man = st.selectbox(
+            "Categoría", options=categories,
+            index=(categories.index("Sin categoría") if "Sin categoría" in categories else 0)
+        )
+        nota_man = st.text_input("Nota (opcional)", value="")
+
+    def _norm_text(s: str) -> str:
+        s = (s or "").strip()
+        s = unicodedata.normalize("NFKD", s)
+        s = "".join(ch for ch in s if not unicodedata.combining(ch))
+        s = s.replace("\n"," ").replace("\t"," ")
+        s = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in s)
+        return " ".join(s.upper().split())
+
+    if st.button("Agregar gasto manual", type="primary"):
+        if not detalle_man or monto_man <= 0:
+            st.warning("Completa **Detalle** y **Monto real** (mayor a 0).")
+        else:
+            try:
+                fstr = pd.to_datetime(fecha_man).strftime("%Y-%m-%d")
+                detalle_norm_man = _norm_text(detalle_man)
+                # Clave estable para manual: prefijo m: para distinguirla de cartolas
+                uk = f"m:{hash((fstr, float(monto_man), detalle_norm_man))}"
+
+                row = {
+                    "unique_key": uk,
+                    "fecha": fstr,
+                    "detalle": detalle_man,
+                    "detalle_norm": detalle_norm_man,
+                    # En la BD manejamos 'monto' visible/positivo para gastos
+                    "monto": float(monto_man),
+                    "monto_real": float(monto_man),
+                    "categoria": cat_man,
+                    "nota_usuario": nota_man,
+                    "es_gasto": True,
+                    "es_transferencia_o_abono": False,
+                }
+
+                inserted_ok = False
+                # Insertar evitando duplicados por unique_key
+                if isinstance(conn, dict) and conn.get("pg"):
+                    engine = conn["engine"]
+                    with engine.begin() as cx:
+                        cx.execute(text(
+                            """
+                            INSERT INTO movimientos (unique_key, fecha, detalle, detalle_norm, monto, categoria, nota_usuario, monto_real, es_gasto, es_transferencia_o_abono)
+                            VALUES (:unique_key, :fecha, :detalle, :detalle_norm, :monto, :categoria, :nota_usuario, :monto_real, :es_gasto, :es_transferencia_o_abono)
+                            ON CONFLICT (unique_key) DO NOTHING
+                            """
+                        ), row)
+                        # comprobar si quedó insertado
+                        got = cx.execute(text("SELECT 1 FROM movimientos WHERE unique_key = :uk"), {"uk": uk}).fetchone()
+                        inserted_ok = bool(got)
+                else:
+                    try:
+                        conn.execute(
+                            """
+                            INSERT OR IGNORE INTO movimientos
+                                (unique_key, fecha, detalle, detalle_norm, monto, categoria, nota_usuario, monto_real, es_gasto, es_transferencia_o_abono)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                row["unique_key"], row["fecha"], row["detalle"], row["detalle_norm"],
+                                row["monto"], row["categoria"], row["nota_usuario"], row["monto_real"],
+                                int(bool(row["es_gasto"])), int(bool(row["es_transferencia_o_abono"]))
+                            ),
+                        )
+                        conn.commit()
+                        inserted_ok = True
+                    except Exception as e:
+                        st.error(f"Error en inserción SQLite: {e}")
+                        inserted_ok = False
+
+                if inserted_ok:
+                    st.success("Gasto manual agregado ✅")
+                    st.rerun()
+                else:
+                    st.info("No se insertó (posible duplicado de unique_key). Modifica el detalle o monto e intenta de nuevo.")
+            except Exception as e:
+                st.error(f"No se pudo agregar el gasto manual: {e}")
 
 st.markdown("### Más análisis")
 df_month2 = df_plot.copy()
