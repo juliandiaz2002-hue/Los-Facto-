@@ -663,13 +663,11 @@ if q:
     dfv = dfv[dfv["detalle_norm"].str.contains(q, case=False, na=False)]
     df_base_compare = df_base_compare[df_base_compare["detalle_norm"].str.contains(q, case=False, na=False)]
 
-# Rango de fechas (si el usuario lo define) → afecta TODO: vista y comparación
+# Rango de fechas (afecta SOLO la vista principal; la comparación mensual usa toda la base)
 if isinstance(rango, tuple) and len(rango) == 2:
     dfv = dfv[(dfv["fecha"] >= pd.to_datetime(rango[0])) & (dfv["fecha"] <= pd.to_datetime(rango[1]))]
-    df_base_compare = df_base_compare[(df_base_compare["fecha"] >= pd.to_datetime(rango[0])) & (df_base_compare["fecha"] <= pd.to_datetime(rango[1]))]
 elif rango:
     dfv = dfv[dfv["fecha"].dt.date == rango]
-    df_base_compare = df_base_compare[df_base_compare["fecha"].dt.date == rango]
 
 # Filtro por mes (solo para la VISTA principal; NO afecta comparación)
 if sel_mes and sel_mes != "Todos":
@@ -816,12 +814,12 @@ if not df_plot.empty:
     chart_donut = (
         alt.Chart(cat_agg)
         .mark_arc(
-            innerRadius=92,
-            outerRadius=130,
-            cornerRadius=5,
-            padAngle=0.02,
-            stroke="#ffffff",
-            strokeWidth=3
+            innerRadius=80,
+            outerRadius=140,
+            cornerRadius=3,
+            padAngle=0.005,
+            stroke="#0b1220",
+            strokeWidth=1
         )
         .encode(
             theta=alt.Theta("total:Q", stack=True),
@@ -874,7 +872,7 @@ if not df_plot.empty:
                 st.rerun()
 
 # === Insights analíticos adicionales ===
-col_tl, col_tr = st.columns([2, 3])
+col_tl = st.container()
 
 # Helper para obtener el DataFrame del "mes actual" (o el último disponible)
 def _df_mes_actual(_df, _sel_mes):
@@ -915,35 +913,6 @@ with col_tl:
             st.table(top5.rename(columns={"detalle_norm": "Lugar", "total": "Total"}))
     else:
         st.caption("(Sin datos para este mes)")
-
-with col_tr:
-    st.markdown("**👥 Propios vs. compartidos**")
-    df_comp = dfv.copy()
-    # Si no existe la columna, asumimos False
-    if "es_compartido_posible" not in df_comp.columns:
-        df_comp["es_compartido_posible"] = False
-    amt_col3 = "monto" if "monto" in df_comp.columns else "monto_real_plot"
-    comp_agg = (
-        df_comp.assign(_amt=np.abs(pd.to_numeric(df_comp[amt_col3], errors="coerce").fillna(0)),
-                        comp=df_comp["es_compartido_posible"].astype(bool).map({True: "Compartido", False: "Propio"}))
-                .groupby("comp")["_amt"].sum().reset_index().rename(columns={"_amt": "total"})
-    )
-    if comp_agg.empty:
-        st.caption("(Sin datos para comparar)")
-    else:
-        chart_comp = (
-            alt.Chart(comp_agg)
-            .mark_bar(cornerRadiusTopRight=4, cornerRadiusBottomRight=4)
-            .encode(
-                x=alt.X("comp:N", title="Tipo"),
-                y=alt.Y("total:Q", title="Total", axis=alt.Axis(format=",.0f")),
-                color=alt.Color("comp:N", legend=None)
-            )
-            .properties(height=220)
-            .configure_view(stroke=None)
-            .configure_axis(grid=False)
-        )
-        st.altair_chart(chart_comp, use_container_width=True)
 
 # Aplicar filtro de categoría si está seleccionado
 if "filtered_category" in st.session_state and st.session_state["filtered_category"]:
