@@ -813,8 +813,6 @@ if not df_plot.empty:
             ],
         )
         .properties(width=420, height=360)
-        .configure_view(stroke=None)
-        .configure_axis(grid=False)
     )
 
     # Texto centrado con el total
@@ -826,7 +824,11 @@ if not df_plot.empty:
         .encode(x=alt.X("x:Q", axis=None), y=alt.Y("y:Q", axis=None), text="txt:N")
     )
 
-    chart_layered = alt.layer(chart_donut, center_text)
+    chart_layered = (
+        alt.layer(chart_donut, center_text)
+        .configure_view(stroke=None)
+        .configure_axis(grid=False)
+    )
 
     # Centrar el donut en la página
     col1, col2, col3 = st.columns([1, 2, 1])
