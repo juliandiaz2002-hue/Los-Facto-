@@ -1055,9 +1055,36 @@ if sel_mes and sel_mes != "Todos" and not df_base_compare.empty:
     except Exception as e:
         st.warning(f"No se pudo generar la comparación: {e}")
 
+
 # Sugerencias de categoría
 st.markdown("### Sugerencias de categoría")
+# Guard flag para auto-aplicación de sugerencias de alta confianza
+if "auto_apply_suggestions_done" not in st.session_state:
+    st.session_state["auto_apply_suggestions_done"] = False
 suggestions_df = build_suggestions_df(dfv, conn)
+
+# Auto-aplicar sugerencias de alta confianza (>= 0.9) una sola vez por sesión
+if (not st.session_state["auto_apply_suggestions_done"]) and (not suggestions_df.empty):
+    high_conf = suggestions_df[suggestions_df["confianza"] >= 0.9].copy()
+    if not high_conf.empty:
+        edits_df = pd.DataFrame()
+        for _, row in high_conf.iterrows():
+            original_row = dfv[dfv["unique_key"] == row["unique_key"]]
+            if not original_row.empty:
+                edit_row = original_row.iloc[0].copy()
+                edit_row["categoria"] = row["sugerida"]
+                edits_df = pd.concat([edits_df, pd.DataFrame([edit_row])], ignore_index=True)
+        if not edits_df.empty:
+            updated = apply_edits(conn, edits_df)
+            try:
+                learned = update_categoria_map_from_df(conn, edits_df)
+                if learned:
+                    st.caption(f"Aprendidas {learned} reglas nuevas por 'detalle_norm'.")
+            except Exception:
+                pass
+            st.success(f"Aplicadas automáticamente {updated} sugerencias de categoría (confianza ≥ 0.9).")
+            st.session_state["auto_apply_suggestions_done"] = True
+            st.rerun()
 
 if not suggestions_df.empty:
     st.caption(f"Se encontraron {len(suggestions_df)} transacciones sin categoría. Revisa las sugerencias:")
@@ -1081,20 +1108,9 @@ if not suggestions_df.empty:
                 if manual_cat != "Sin categoría":
                     suggestions_df.loc[idx, "manual"] = manual_cat
         
-        col_apply, col_accept_all = st.columns(2)
-        with col_apply:
-            apply_selected = st.form_submit_button("Aplicar seleccionadas")
-        with col_accept_all:
-            accept_high_conf = st.form_submit_button("Aceptar todas ≥ 0.9")
-        
-        if apply_selected or accept_high_conf:
-            # Aplicar sugerencias aceptadas
+        apply_selected = st.form_submit_button("Aplicar seleccionadas")
+        if apply_selected:
             to_apply = suggestions_df.copy()
-            
-            if accept_high_conf:
-                # Aceptar todas con confianza ≥ 0.9
-                high_conf_mask = to_apply["confianza"] >= 0.9
-                to_apply.loc[high_conf_mask, "aceptar"] = True
             
             # Filtrar solo las aceptadas
             accepted = to_apply[to_apply["aceptar"] == True].copy()
