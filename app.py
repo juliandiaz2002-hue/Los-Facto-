@@ -766,16 +766,39 @@ if chips:
     st.markdown("---")
 
 st.markdown("### Insights principales")
-col1, col2 = st.columns([1,1])
+# Cálculos base para métricas
+amt_col = "monto" if "monto" in df_plot.columns else "monto_real_plot"
+_total_series = pd.to_numeric(df_plot[amt_col], errors="coerce").abs().fillna(0)
+total_real = float(_total_series.sum())
+
+# Ventana temporal visible (para promedios)
+if not df_plot.empty:
+    min_d, max_d = pd.to_datetime(df_plot["fecha"]).min(), pd.to_datetime(df_plot["fecha"]).max()
+    # Días efectivos (al menos 1 para evitar división por 0)
+    days = max(1, int((max_d.normalize() - min_d.normalize()).days) + 1) if pd.notna(min_d) and pd.notna(max_d) else 1
+    prom_diario = total_real / days
+    # Promedio mensual: sumar por mes visible y promediar
+    df_plot_m = df_plot.copy()
+    df_plot_m["mes"] = df_plot_m["fecha"].dt.to_period("M").astype(str)
+    monthly_totals = df_plot_m.groupby("mes")[amt_col].apply(lambda s: pd.to_numeric(s, errors="coerce").abs().sum()).reset_index(name="monto")
+    prom_mensual = float(monthly_totals["monto"].mean()) if not monthly_totals.empty else total_real
+else:
+    prom_diario = 0.0
+    prom_mensual = 0.0
+
+col1, col2, col3 = st.columns(3)
 with col1:
-    amt_col = "monto" if "monto" in df_plot.columns else "monto_real_plot"
-    total_real = float(df_plot[amt_col].abs().fillna(0).sum())
     st.metric("Gasto real (visible)", f"${total_real:,.0f}")
 with col2:
-    if not df_plot.empty:
-        cat_agg_metric = df_plot.assign(_amt=np.abs(df_plot[amt_col].astype(float))).groupby("categoria")["_amt"].sum().sort_values(ascending=False)
-        if len(cat_agg_metric) > 0:
-            st.metric("Categoría más relevante", f"{cat_agg_metric.index[0]}")
+    st.metric("Promedio diario", f"${prom_diario:,.0f}")
+with col3:
+    st.metric("Promedio mensual", f"${prom_mensual:,.0f}")
+
+# Categoría más relevante se muestra debajo para evitar saturación
+if not df_plot.empty:
+    cat_agg_metric = df_plot.assign(_amt=np.abs(pd.to_numeric(df_plot[amt_col], errors="coerce").fillna(0))).groupby("categoria")["_amt"].sum().sort_values(ascending=False)
+    if len(cat_agg_metric) > 0:
+        st.caption(f"Categoría más relevante: **{cat_agg_metric.index[0]}**")
 
 # Donut por categoría (centrado, compacto, con total al centro)
 if not df_plot.empty:
@@ -849,6 +872,78 @@ if not df_plot.empty:
             if st.button("✅ Aplicar filtro", key="apply_filter"):
                 st.session_state["filtered_category"] = selected_category
                 st.rerun()
+
+# === Insights analíticos adicionales ===
+col_tl, col_tr = st.columns([2, 3])
+
+# Helper para obtener el DataFrame del "mes actual" (o el último disponible)
+def _df_mes_actual(_df, _sel_mes):
+    if _df.empty:
+        return _df
+    if _sel_mes and _sel_mes != "Todos":
+        y, m = _sel_mes.split("-")
+        _start = pd.to_datetime(f"{y}-{m}-01")
+        _end = _start + pd.offsets.MonthEnd(1)
+        return _df[(_df["fecha"] >= _start) & (_df["fecha"] <= _end)].copy()
+    # Sin selección: tomar el último mes presente en los datos visibles
+    tmp = _df.copy()
+    tmp["mes"] = tmp["fecha"].dt.to_period("M").astype(str)
+    if tmp["mes"].empty:
+        return _df
+    last_month = sorted(tmp["mes"].dropna().unique().tolist())[-1]
+    y, m = last_month.split("-")
+    _start = pd.to_datetime(f"{y}-{m}-01")
+    _end = _start + pd.offsets.MonthEnd(1)
+    return _df[(tmp["fecha"] >= _start) & (tmp["fecha"] <= _end)].copy()
+
+with col_tl:
+    st.markdown("**🏪 Top 5 lugares del mes**")
+    df_mes = _df_mes_actual(dfv, sel_mes)
+    if not df_mes.empty:
+        # Agregar por comercio (detalle_norm) y, como respaldo, por categoría
+        amt_col2 = "monto" if "monto" in df_mes.columns else "monto_real_plot"
+        by_merchant = (
+            df_mes.assign(_amt=np.abs(pd.to_numeric(df_mes[amt_col2], errors="coerce").fillna(0)))
+                  .groupby("detalle_norm")["_amt"].sum().reset_index()
+                  .rename(columns={"_amt": "total"})
+                  .sort_values("total", ascending=False)
+        )
+        top5 = by_merchant.head(5)
+        if top5.empty:
+            st.caption("(Sin datos suficientes en el mes actual)")
+        else:
+            st.table(top5.rename(columns={"detalle_norm": "Lugar", "total": "Total"}))
+    else:
+        st.caption("(Sin datos para este mes)")
+
+with col_tr:
+    st.markdown("**👥 Propios vs. compartidos**")
+    df_comp = dfv.copy()
+    # Si no existe la columna, asumimos False
+    if "es_compartido_posible" not in df_comp.columns:
+        df_comp["es_compartido_posible"] = False
+    amt_col3 = "monto" if "monto" in df_comp.columns else "monto_real_plot"
+    comp_agg = (
+        df_comp.assign(_amt=np.abs(pd.to_numeric(df_comp[amt_col3], errors="coerce").fillna(0)),
+                        comp=df_comp["es_compartido_posible"].astype(bool).map({True: "Compartido", False: "Propio"}))
+                .groupby("comp")["_amt"].sum().reset_index().rename(columns={"_amt": "total"})
+    )
+    if comp_agg.empty:
+        st.caption("(Sin datos para comparar)")
+    else:
+        chart_comp = (
+            alt.Chart(comp_agg)
+            .mark_bar(cornerRadiusTopRight=4, cornerRadiusBottomRight=4)
+            .encode(
+                x=alt.X("comp:N", title="Tipo"),
+                y=alt.Y("total:Q", title="Total", axis=alt.Axis(format=",.0f")),
+                color=alt.Color("comp:N", legend=None)
+            )
+            .properties(height=220)
+            .configure_view(stroke=None)
+            .configure_axis(grid=False)
+        )
+        st.altair_chart(chart_comp, use_container_width=True)
 
 # Aplicar filtro de categoría si está seleccionado
 if "filtered_category" in st.session_state and st.session_state["filtered_category"]:
