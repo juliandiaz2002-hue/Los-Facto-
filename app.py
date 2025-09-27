@@ -7,6 +7,7 @@ import numpy as np
 import altair as alt
 import json
 import math
+import hashlib
 from datetime import datetime, timedelta
 from sqlalchemy import text
 
@@ -210,7 +211,16 @@ MONTH_NAMES = {
 
 @st.cache_data(show_spinner=False)
 def load_df(file):
-    df = pd.read_csv(file)
+    try:
+        # Auto-detect delimiter ("," or ";") using the Python engine
+        df = pd.read_csv(file, sep=None, engine="python")
+    except Exception:
+        # Fallback: reset file pointer and try default params
+        try:
+            file.seek(0)
+        except Exception:
+            pass
+        df = pd.read_csv(file)
     missing = REQUIRED_COLS - set(df.columns)
     if missing:
         st.error(f"Faltan columnas requeridas: {sorted(missing)}")
@@ -1664,7 +1674,8 @@ with st.expander("➕ Agregar gasto manual"):
                 fstr = pd.to_datetime(fecha_man).strftime("%Y-%m-%d")
                 detalle_norm_man = _norm_text(detalle_man)
                 # Clave estable para manual: prefijo m: para distinguirla de cartolas
-                uk = f"m:{hash((fstr, float(monto_man), detalle_norm_man))}"
+                key_material = f"{fstr}|{float(monto_man):.2f}|{detalle_norm_man}"
+                uk = "m:" + hashlib.sha1(key_material.encode("utf-8")).hexdigest()[:16]
 
                 row = {
                     "unique_key": uk,
