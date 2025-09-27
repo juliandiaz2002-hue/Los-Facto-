@@ -460,20 +460,15 @@ uploaded = st.file_uploader(
 if uploaded is not None:
     df_in = load_df(uploaded)
 
-    # Opción: forzar todo como Gasto (convierte montos a negativo y marca flags)
-    force_all_gasto = st.checkbox(
-        "Forzar todo como Gasto (convierte montos a negativo)", value=True,
-        help="Convierte todos los montos a negativos y marca tipo=Gasto; los ingresos los manejarás manualmente."
-    )
-    if force_all_gasto:
-        # usar monto_cartola como base inmutable; solo firmamos el signo visible
-        if "monto_cartola" in df_in.columns:
-            df_in["monto"] = -pd.to_numeric(df_in["monto_cartola"], errors="coerce").abs()
-        else:
-            df_in["monto"] = -pd.to_numeric(df_in.get("monto", 0), errors="coerce").abs()
-        df_in["tipo"] = "Gasto"
-        df_in["es_gasto"] = True
-        df_in["es_transferencia_o_abono"] = False
+    # Forzar todo como Gasto (convierte montos a negativo) — SIEMPRE ACTIVO
+    # usar monto_cartola como base inmutable; solo firmamos el signo visible
+    if "monto_cartola" in df_in.columns:
+        df_in["monto"] = -pd.to_numeric(df_in["monto_cartola"], errors="coerce").abs()
+    else:
+        df_in["monto"] = -pd.to_numeric(df_in.get("monto", 0), errors="coerce").abs()
+    df_in["tipo"] = "Gasto"
+    df_in["es_gasto"] = True
+    df_in["es_transferencia_o_abono"] = False
 
     # Normalizar flags booleanos a True/False (evita DataError de Postgres por 0/1)
     for _col in ["es_gasto", "es_transferencia_o_abono", "es_compartido_posible"]:
@@ -481,9 +476,9 @@ if uploaded is not None:
             s = df_in[_col].astype(str).str.strip().str.lower()
             df_in[_col] = s.isin(["1", "true", "t", "yes", "y", "si", "sí"])
         else:
-            # defaults razonables
+            # defaults razonables (siempre gasto por diseño)
             if _col == "es_gasto":
-                df_in[_col] = bool(force_all_gasto)
+                df_in[_col] = True
             else:
                 df_in[_col] = False
 
@@ -522,86 +517,6 @@ if uploaded is not None:
             return f"h:{hash((fstr, mc_val, d))}"
         df_in["unique_key"] = df_in.apply(_uk_stable_ing, axis=1)
 
-    # --- DEBUG de ingesta (previo a upsert) ---
-    with st.expander("🔎 Debug de ingesta (previo a upsert)", expanded=False):
-        try:
-            st.write(f"Filas leídas: {len(df_in)}")
-            st.write({"Columnas": list(df_in.columns)})
-            st.write("Primeras unique_key recalculadas:", df_in["unique_key"].head(5).tolist())
-
-            # Ver intersección con la BD (para entender por qué ingresa 0)
-            intersec = 0
-            total_existentes = 0
-            try:
-                if isinstance(conn, dict) and conn.get("pg"):
-                    engine = conn["engine"]
-                    with engine.connect() as cx:
-                        existing = pd.read_sql_query(text("SELECT unique_key FROM movimientos"), cx)
-                else:
-                    existing = pd.read_sql_query("SELECT unique_key FROM movimientos", conn)
-                if existing is not None and not existing.empty:
-                    total_existentes = len(existing)
-                    intersec = int(df_in["unique_key"].isin(existing["unique_key"].astype(str)).sum())
-            except Exception as _e:
-                st.caption(f"(No se pudo leer claves existentes: {_e})")
-
-            st.write({
-                "unique_keys_en_archivo": int(len(df_in["unique_key"])),
-                "unique_keys_en_BD": int(total_existentes),
-                "coincidencias_archivo_vs_BD": int(intersec),
-            })
-
-            # Duplicados dentro del mismo archivo
-            dup_mask = df_in["unique_key"].duplicated(keep=False)
-            dups = int(dup_mask.sum())
-            if dups > 0:
-                st.warning(f"Hay {dups} filas con unique_key duplicada dentro del archivo.")
-                st.dataframe(
-                    df_in.loc[dup_mask, [c for c in ["fecha","detalle","monto","monto_real","detalle_norm","unique_key"] if c in df_in.columns]].head(20),
-                    use_container_width=True
-                )
-
-            st.dataframe(df_in.head(10), use_container_width=True)
-        except Exception as _dbg_e:
-            st.info(f"Debug de ingesta no disponible: {type(_dbg_e).__name__}: {_dbg_e}")
-
-    # --- DEBUG de payload (Parte 2): validar esquema vs DB y ejemplo de fila a insertar ---
-    with st.expander("🧪 Debug de payload (Parte 2)", expanded=False):
-        try:
-            # Columnas que normalmente espera el INSERT (todas opcionales excepto algunas claves)
-            expected = [
-                "id", "fecha", "detalle", "monto", "es_gasto", "es_transferencia_o_abono", "es_compartido_posible",
-                "fraccion_mia_sugerida", "monto_mio_estimado", "categoria_sugerida", "detalle_norm",
-                "monto_real", "categoria", "nota_usuario", "unique_key"
-            ]
-            present = [c for c in expected if c in df_in.columns]
-            missing = [c for c in expected if c not in df_in.columns]
-            st.write({
-                "esperadas": expected,
-                "presentes": present,
-                "faltan": missing,
-            })
-
-            # Tipos actuales de columnas clave
-            key_cols = ["fecha", "monto", "monto_real", "detalle", "detalle_norm", "categoria", "es_gasto", "es_transferencia_o_abono", "es_compartido_posible", "unique_key"]
-            tipos = {c: str(df_in[c].dtype) for c in key_cols if c in df_in.columns}
-            st.write({"dtypes_clave": tipos})
-
-            # Asegurar que booleans se vean como booleans (no 0/1) en una muestra del payload
-            def _cast_bool_cols(row):
-                r = row.copy()
-                for _c in ["es_gasto", "es_transferencia_o_abono", "es_compartido_posible"]:
-                    if _c in r:
-                        r[_c] = bool(r[_c])
-                return r
-
-            sample_payload = None
-            if not df_in.empty:
-                sample_payload = _cast_bool_cols(df_in.iloc[0].to_dict())
-            st.write("Ejemplo de payload (primera fila):")
-            st.json(sample_payload)
-        except Exception as _dbg2_e:
-            st.info(f"Debug de payload no disponible: {type(_dbg2_e).__name__}: {_dbg2_e}")
 
     # --- Filtrar transacciones previamente borradas (tombstones) ---
     try:
@@ -856,12 +771,7 @@ if not df_plot.empty:
             color=alt.Color(
                 "categoria:N",
                 scale=alt.Scale(domain=domain, range=range_colors),
-                legend=alt.Legend(
-                    title="Categoría",
-                    orient="bottom",
-                    direction="horizontal",
-                    columns=4
-                )
+                legend=None
             ),
             tooltip=[
                 alt.Tooltip("categoria:N", title="Categoría"),
