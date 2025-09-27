@@ -565,12 +565,12 @@ if df.empty:
 # Filtros en sidebar
 with st.sidebar:
     st.header("Filtros")
-    q = st.text_input("Buscar en detalle", "")
+    q = st.text_input("Buscar en detalle", "", key="search_q")
     # Filtro por mes (además del rango de fechas)
     df_months = df.copy()
     df_months["mes"] = df_months["fecha"].dt.to_period("M").astype(str)
     months = sorted([m for m in df_months["mes"].dropna().unique().tolist()])
-    sel_mes = st.selectbox("Mes", options=["Todos"] + months, index=0)
+    sel_mes = st.selectbox("Mes", options=["Todos"] + months, index=0, key="month_filter")
     st.caption("Si eliges un **Mes**, solo la vista principal se filtra a ese mes. La comparación mensual usa el set completo (o el rango de fechas si lo defines abajo).")
     min_fecha, max_fecha = df["fecha"].min(), df["fecha"].max()
     if pd.isna(min_fecha) or pd.isna(max_fecha):
@@ -579,6 +579,7 @@ with st.sidebar:
         rango = st.date_input(
             "Rango de fechas",
             (min_fecha.date(), max_fecha.date()),
+            key="date_range"
         )
     st.divider()
     with st.expander("Gestionar categorías"):
@@ -617,6 +618,11 @@ with st.sidebar:
             st.success(f"'{old_name}' → '{new_name.strip()}' actualizado")
             # Refrescar para recargar df desde la base y aplicar nombre nuevo en la tabla
             st.rerun()
+
+# --- Leer valores de filtros desde session_state para uso global ---
+q = st.session_state.get("search_q", "")
+sel_mes = st.session_state.get("month_filter", "Todos")
+rango = st.session_state.get("date_range", rango)
 
 
 # Preparar bases de trabajo
@@ -730,6 +736,35 @@ for c in domain:
     colors_by_category[c] = nxt
 range_colors = [colors_by_category[c] for c in domain]
 
+ 
+# --- Chips de filtros activos ---
+chips = []
+if sel_mes and sel_mes != "Todos":
+    chips.append(("Mes", sel_mes, "clear_mes"))
+if "filtered_category" in st.session_state and st.session_state["filtered_category"]:
+    chips.append(("Categoría", st.session_state["filtered_category"], "clear_cat"))
+if q:
+    chips.append(("Búsqueda", q, "clear_q"))
+if isinstance(rango, tuple) and len(rango) == 2:
+    chips.append(("Rango", f"{rango[0]} → {rango[1]}", "clear_range"))
+
+if chips:
+    st.markdown("#### Filtros activos")
+    cols = st.columns(len(chips))
+    for i, (lbl, val, keybtn) in enumerate(chips):
+        with cols[i]:
+            if st.button(f"{lbl}: {val} ✕", key=keybtn):
+                if keybtn == "clear_mes":
+                    st.session_state["month_filter"] = "Todos"
+                elif keybtn == "clear_cat":
+                    st.session_state.pop("filtered_category", None)
+                elif keybtn == "clear_q":
+                    st.session_state["search_q"] = ""
+                elif keybtn == "clear_range":
+                    st.session_state["date_range"] = None
+                st.rerun()
+    st.markdown("---")
+
 st.markdown("### Insights principales")
 col1, col2 = st.columns([1,1])
 with col1:
@@ -742,7 +777,7 @@ with col2:
         if len(cat_agg_metric) > 0:
             st.metric("Categoría más relevante", f"{cat_agg_metric.index[0]}")
 
-# Donut por categoría (centrado y simple)
+# Donut por categoría (centrado, compacto, con total al centro)
 if not df_plot.empty:
     amt_col = "monto" if "monto" in df_plot.columns else "monto_real_plot"
     cat_agg = (
@@ -751,20 +786,19 @@ if not df_plot.empty:
         .rename(columns={"_amt": "total"})
         .sort_values("total", ascending=False)
     )
-    
-    # Layout simple: donut centrado, sin redundancia
+
     st.markdown("### Distribución de Gastos por Categoría")
-    
-    # Donut centrado y optimizado
+
+    # Donut más compacto y con borde más grueso
     chart_donut = (
         alt.Chart(cat_agg)
         .mark_arc(
-            innerRadius=80, 
-            outerRadius=140, 
-            cornerRadius=4, 
+            innerRadius=92,
+            outerRadius=130,
+            cornerRadius=5,
             padAngle=0.02,
             stroke="#ffffff",
-            strokeWidth=2
+            strokeWidth=3
         )
         .encode(
             theta=alt.Theta("total:Q", stack=True),
@@ -778,21 +812,28 @@ if not df_plot.empty:
                 alt.Tooltip("total:Q", format=",.0f", title="Total")
             ],
         )
-        .properties(
-            width=500,
-            height=400,
-            padding={"top": 24, "right": 0, "bottom": 0, "left": 0}
-        )
+        .properties(width=420, height=360)
         .configure_view(stroke=None)
         .configure_axis(grid=False)
     )
-    
-    # Centrar el donut
+
+    # Texto centrado con el total
+    total_sum = float(cat_agg["total"].sum()) if not cat_agg.empty else 0.0
+    center_text_df = pd.DataFrame({"x": [210], "y": [180], "txt": [f"${total_sum:,.0f}"]})
+    center_text = (
+        alt.Chart(center_text_df)
+        .mark_text(fontSize=22, fontWeight="bold", color="#e5e7eb")
+        .encode(x=alt.X("x:Q", axis=None), y=alt.Y("y:Q", axis=None), text="txt:N")
+    )
+
+    chart_layered = alt.layer(chart_donut, center_text)
+
+    # Centrar el donut en la página
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
-        st.altair_chart(chart_donut, use_container_width=True, theme="streamlit")
-    
-    # Selector simple de categoría para filtrado
+        st.altair_chart(chart_layered, use_container_width=False, theme="streamlit")
+
+    # Selector simple de categoría para filtrado (se mantiene)
     st.markdown("---")
     col_filter1, col_filter2, col_filter3 = st.columns([1, 2, 1])
     with col_filter2:
@@ -802,7 +843,6 @@ if not df_plot.empty:
             options=["Todas las categorías"] + cat_agg["categoria"].tolist(),
             key="category_filter"
         )
-        
         if selected_category != "Todas las categorías":
             if st.button("✅ Aplicar filtro", key="apply_filter"):
                 st.session_state["filtered_category"] = selected_category
@@ -1159,6 +1199,7 @@ if not dfv.empty:
     st.markdown("---")
 
 display_cols = [
+    "◼",
     "id",
     "fecha",
     "detalle",
@@ -1191,8 +1232,38 @@ if "nota_usuario" not in df_view.columns:
 else:
     df_view["nota_usuario"] = df_view["nota_usuario"].fillna("")
 
+# Añadir columna de indicador visual por categoría
 df_table_cols = [c for c in existing_cols if c in df_view.columns]
 df_table = df_view[df_table_cols].copy()
+# Indicador de color por categoría (emojis cuadrados) para facilitar el escaneo
+_base_emojis = ["🟥","🟧","🟨","🟩","🟦","🟪","🟫","⬛"]
+def _hex_to_rgb(_h):
+    _h = (_h or "").lstrip("#")
+    if len(_h) == 3:
+        _h = "".join([c*2 for c in _h])
+    try:
+        return tuple(int(_h[i:i+2], 16) for i in (0,2,4))
+    except Exception:
+        return (128,128,128)
+def _emoji_for_hex(_h):
+    r,g,b = _hex_to_rgb(_h)
+    # heurística simple por canal dominante
+    if r > 200 and g < 100 and b < 100: return "🟥"
+    if r > 200 and g > 120 and b < 60:  return "🟧"
+    if r > 200 and g > 200 and b < 120: return "🟨"
+    if g > 160 and r < 120 and b < 120: return "🟩"
+    if b > 160 and r < 120 and g < 160: return "🟦"
+    if r > 150 and b > 150 and g < 140: return "🟪"
+    if r > 120 and g < 90 and b < 90:   return "🟫"
+    return "⬛"
+_indicator = []
+if "categoria" in df_view.columns:
+    for _cat in df_view["categoria"].fillna(""):
+        col_hex = colors_by_category.get(_cat, "#9ca3af")
+        _indicator.append(_emoji_for_hex(col_hex))
+else:
+    _indicator = ["⬛"] * len(df_view)
+df_table.insert(0, "◼", _indicator)
 # === Inline delete checkbox (solo UI, sin lógica aún) ===
 if "eliminar" not in df_table.columns:
     df_table["eliminar"] = False
@@ -1252,6 +1323,7 @@ with st.form("editor_form", clear_on_submit=False):
         use_container_width=True,
         key="tabla_gastos",
         column_config={
+            "◼": st.column_config.TextColumn(label="", help="Indicador de color de categoría", disabled=True, width="small"),
             "fecha": st.column_config.DatetimeColumn(
                 format="YYYY-MM-DD",
                 help="Fecha de la transacción"
