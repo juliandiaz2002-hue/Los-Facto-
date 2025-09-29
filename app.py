@@ -30,8 +30,8 @@ st.set_page_config(page_title="Dashboard de Facto$", layout="wide")
 st.title("Dashboard de Facto$")
 
 # --- Modo móvil (flag por URL y CSS responsive) ---
-_qp = st.experimental_get_query_params() if hasattr(st, "experimental_get_query_params") else {}
-MOBILE = str(_qp.get("mobile", ["0"])[0]).lower() in ("1", "true", "yes")
+_qp = st.query_params
+MOBILE = str(_qp.get("mobile", "0")).lower() in ("1", "true", "yes")
 
 # CSS responsive básico para pantallas pequeñas
 st.markdown(
