@@ -29,6 +29,28 @@ st.set_page_config(page_title="Dashboard de Facto$", layout="wide")
 
 st.title("Dashboard de Facto$")
 
+# --- Modo móvil (flag por URL y CSS responsive) ---
+_qp = st.experimental_get_query_params() if hasattr(st, "experimental_get_query_params") else {}
+MOBILE = str(_qp.get("mobile", ["0"])[0]).lower() in ("1", "true", "yes")
+
+# CSS responsive básico para pantallas pequeñas
+st.markdown(
+    """
+    <style>
+    @media (max-width: 480px){
+      h1{ font-size: 1.8rem !important; }
+      h2{ font-size: 1.25rem !important; }
+      h3{ font-size: 1.05rem !important; }
+      [data-testid=\"stSidebar\"]{ width: 78vw !important; }
+      .block-container{ padding-left: 0.6rem !important; padding-right: 0.6rem !important; }
+      div[data-testid=\"stMetric\"]{ padding: 8px 10px; }
+      .vega-embed, canvas{ max-width: 100% !important; height: auto !important; }
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 # Estilos ligeros (color primario en sidebar)
 st.markdown(
     """
@@ -564,6 +586,7 @@ if df.empty:
 
 # Filtros en sidebar
 with st.sidebar:
+    mobile_chk = st.checkbox("📱 Modo móvil", value=MOBILE, help="Optimiza la UI para pantallas pequeñas")
     st.header("Filtros")
     q = st.text_input("Buscar en detalle", "", key="search_q")
     # Filtro por mes (además del rango de fechas)
@@ -619,6 +642,7 @@ with st.sidebar:
             # Refrescar para recargar df desde la base y aplicar nombre nuevo en la tabla
             st.rerun()
 
+MOBILE = mobile_chk
 # --- Leer valores de filtros desde session_state para uso global ---
 q = st.session_state.get("search_q", "")
 sel_mes = st.session_state.get("month_filter", "Todos")
