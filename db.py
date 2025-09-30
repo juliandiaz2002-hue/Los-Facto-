@@ -70,6 +70,10 @@ def init_db(conn) -> None:
             ))
             # Ensure unique index on unique_key for movimientos
             e.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS idx_movimientos_unique_key ON movimientos(unique_key);"))
+            # Índices de rendimiento
+            e.execute(text("CREATE INDEX IF NOT EXISTS idx_movimientos_detalle_norm ON movimientos(detalle_norm);"))
+            e.execute(text("CREATE INDEX IF NOT EXISTS idx_movimientos_fecha ON movimientos(DATE(fecha));"))
+            e.execute(text("CREATE INDEX IF NOT EXISTS idx_movimientos_categoria ON movimientos(categoria);"))
             # tablas auxiliares
             e.execute(text("CREATE TABLE IF NOT EXISTS categorias (nombre TEXT UNIQUE);"))
             e.execute(text("CREATE TABLE IF NOT EXISTS categoria_map (detalle_norm TEXT PRIMARY KEY, categoria TEXT);"))
@@ -134,6 +138,11 @@ def init_db(conn) -> None:
     conn.commit()
     # Ensure unique index on unique_key for movimientos in SQLite
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_movimientos_unique_key ON movimientos(unique_key);")
+    conn.commit()
+    # Índices de rendimiento en SQLite
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_movimientos_detalle_norm ON movimientos(detalle_norm);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_movimientos_fecha ON movimientos(fecha);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_movimientos_categoria ON movimientos(categoria);")
     conn.commit()
 
     existing = {r[1] for r in conn.execute("PRAGMA table_info(movimientos)").fetchall()}
