@@ -33,6 +33,17 @@ st.title("Dashboard de Facto$")
 _qp = st.query_params
 MOBILE = str(_qp.get("mobile", "0")).lower() in ("1", "true", "yes")
 
+# Selector de tema (Claro por defecto)
+if "theme" not in st.session_state:
+    st.session_state["theme"] = "Claro"
+with st.sidebar:
+    st.session_state["theme"] = st.selectbox(
+        "Tema",
+        options=["Claro", "Oscuro"],
+        index=(0 if st.session_state["theme"] == "Claro" else 1),
+        help="Cambia entre tema claro y oscuro"
+    )
+
 # CSS responsive básico para pantallas pequeñas
 st.markdown(
     """
@@ -47,6 +58,37 @@ st.markdown(
       .vega-embed, canvas{ max-width: 100% !important; height: auto !important; }
     }
     </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+# Variables de tema y activación (Claro/Oscuro)
+_theme = st.session_state.get("theme", "Claro")
+st.markdown(
+    f"""
+<style>
+html[data-theme=\"Claro\"] {{
+  --facto-primary:#0ea5e9;
+  --facto-bg:#f7fafc;
+  --facto-surface:#ffffff;
+  --facto-card:#ffffff;
+  --facto-border:#e5e7eb;
+  --facto-text:#0f172a;
+  --facto-muted:#6b7280;
+}}
+html[data-theme=\"Oscuro\"] {{
+  --facto-primary:#22c55e;
+  --facto-bg:#0b1220;
+  --facto-surface:#0f172a;
+  --facto-card:#111827;
+  --facto-border:#1f2937;
+  --facto-text:#e5e7eb;
+  --facto-muted:#9ca3af;
+}}
+</style>
+<script>
+  (function(){{ try{{ document.documentElement.setAttribute('data-theme', '{_theme}'); }}catch(e){{}} }})();
+</script>
     """,
     unsafe_allow_html=True,
 )
@@ -103,7 +145,7 @@ section[data-testid="stSidebar"] select{
 }
 [data-testid="stSidebar"] .stButton > button{
   background-color: var(--facto-primary) !important;
-  color: #0b1220 !important;
+  color: #ffffff !important;
   border: 1px solid var(--facto-primary) !important;
   font-weight: 700;
 }
@@ -121,7 +163,7 @@ section[data-testid="stSidebar"] [data-baseweb="slider"] > div{
 /* Buttons (global) */
 .stButton > button{
   background-color: var(--facto-primary) !important;
-  color: #0b1220 !important;
+  color: #ffffff !important;
   border: 1px solid var(--facto-primary) !important;
   font-weight: 700;
   border-radius: 10px;
@@ -184,13 +226,13 @@ details[data-testid="stExpander"] summary{
 
 /* Vega/Altair canvas spacing (subtle drop shadow) */
 .js-plotly-plot, .vega-embed{
-  filter: drop-shadow(0 6px 14px rgba(0,0,0,.25));
+  filter: drop-shadow(0 6px 14px rgba(0,0,0,.12));
 }
 
 /* Inputs focus ring */
 input:focus, textarea:focus, select:focus{
   outline: none !important;
-  box-shadow: 0 0 0 2px rgba(34,197,94,.35) !important;
+  box-shadow: 0 0 0 2px rgba(14,165,233,.35) !important;
   border-color: var(--facto-primary) !important;
 }
 </style>
@@ -877,6 +919,43 @@ with col2:
     st.metric("Promedio diario", f"${prom_diario:,.0f}")
 with col3:
     st.metric("Promedio mensual", f"${prom_mensual:,.0f}")
+
+# Bloque de insights rápidos
+st.markdown("---")
+st.markdown("#### 🧠 Insights rápidos")
+try:
+    # Mayor variación mensual reciente
+    _maux = df_plot.copy()
+    _maux["mes"] = _maux["fecha"].dt.to_period("M").astype(str)
+    _amtc = "monto" if "monto" in _maux.columns else "monto_real_plot"
+    _series = _maux.assign(_a=np.abs(pd.to_numeric(_maux[_amtc], errors="coerce").fillna(0))).groupby("mes")["_a"].sum().sort_index()
+    delta_text = "n/a"
+    if len(_series) >= 2:
+        last = _series.iloc[-1]
+        prev = _series.iloc[-2]
+        if prev > 0:
+            pct = (last - prev) / prev * 100.0
+            delta_text = ("+" if pct >= 0 else "") + f"{pct:.1f}% vs mes anterior"
+        else:
+            delta_text = "nuevo mes sin base"
+    # Comercio más relevante del mes actual
+    df_mes_ins = _maux.copy()
+    if not df_mes_ins.empty:
+        df_mes_ins["mes"] = df_mes_ins["fecha"].dt.to_period("M").astype(str)
+        last_m = sorted([m for m in df_mes_ins["mes"].dropna().unique()])[-1]
+        curm = df_mes_ins[df_mes_ins["mes"] == last_m]
+        by_place = curm.assign(_a=np.abs(pd.to_numeric(curm[_amtc], errors="coerce").fillna(0))).groupby("detalle_norm")["_a"].sum().sort_values(ascending=False)
+        top_place = by_place.index[0] if len(by_place) else "-"
+        top_place_val = float(by_place.iloc[0]) if len(by_place) else 0.0
+    else:
+        top_place, top_place_val = "-", 0.0
+    c_i1, c_i2 = st.columns(2)
+    with c_i1:
+        st.metric("Variación mensual", delta_text)
+    with c_i2:
+        st.metric("Top lugar del mes", top_place, help=f"Total: ${top_place_val:,.0f}")
+except Exception:
+    pass
 
 # Categoría más relevante se muestra debajo para evitar saturación
 if not df_plot.empty:
