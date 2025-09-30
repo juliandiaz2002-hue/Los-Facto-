@@ -317,126 +317,188 @@ def load_df(file):
     return df
 
 def build_suggestions_df(df, conn):
-    """Construir DataFrame de sugerencias de categoría"""
+    """Construir DataFrame de sugerencias de categoría (optimizado, consultas en lote)."""
     # Filas sin categoría o "Sin categoría"
     mask = (df["categoria"].isna()) | (df["categoria"] == "") | (df["categoria"] == "Sin categoría")
     sug_df = df[mask].copy()
-    
     if sug_df.empty:
         return pd.DataFrame()
-    
-    # Fuentes de sugerencia
-    suggestions = []
-    
-    for _, row in sug_df.iterrows():
-        detalle_norm = row["detalle_norm"]
-        if pd.isna(detalle_norm) or detalle_norm == "":
-            continue
-            
-        # 1. Mapa exacto (confianza 1.0)
+
+    # Asegurar columna detalle_norm consistente
+    sug_df = sug_df.copy()
+    if "detalle_norm" not in sug_df.columns:
+        def _norm(s):
+            if pd.isna(s):
+                return ""
+            s = str(s).strip()
+            s = unicodedata.normalize("NFKD", s)
+            s = "".join(ch for ch in s if not unicodedata.combining(ch))
+            s = s.replace("\n", " ").replace("\t", " ")
+            s = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in s)
+            return " ".join(s.upper().split())
+        sug_df["detalle_norm"] = sug_df["detalle"].apply(_norm)
+
+    # 1) Resolver mapa exacto para TODOS los detalle_norm únicos en una sola consulta
+    dn_list = sorted(set(sug_df["detalle_norm"].dropna().astype(str)))
+    if not dn_list:
+        return pd.DataFrame()
+
+    exact_map = {}
+    try:
         if isinstance(conn, dict) and conn.get("pg"):
             engine = conn["engine"]
             with engine.connect() as cx:
-                result = cx.execute(text("SELECT categoria FROM categoria_map WHERE detalle_norm = :dn"), {"dn": detalle_norm})
-                exact_match = result.fetchone()
+                params = {f"dn{i}": v for i, v in enumerate(dn_list)}
+                placeholders = ", ".join([f":dn{i}" for i in range(len(dn_list))])
+                q = text(f"SELECT detalle_norm, categoria FROM categoria_map WHERE detalle_norm IN ({placeholders})")
+                rows = cx.execute(q, params).fetchall()
+                exact_map = {r[0]: r[1] for r in rows}
         else:
-            cur = conn.execute("SELECT categoria FROM categoria_map WHERE detalle_norm = ?", (detalle_norm,))
-            exact_match = cur.fetchone()
-        
-        if exact_match:
-            suggestions.append({
+            placeholders = ",".join(["?"] * len(dn_list))
+            q = f"SELECT detalle_norm, categoria FROM categoria_map WHERE detalle_norm IN ({placeholders})"
+            rows = conn.execute(q, dn_list).fetchall()
+            exact_map = {r[0]: r[1] for r in rows}
+    except Exception:
+        exact_map = {}
+
+    # Pre-arreglo de resultados (los del mapa exacto se resuelven directo)
+    results = []
+    pending_dns = []
+    for _, row in sug_df.iterrows():
+        dn = str(row.get("detalle_norm") or "")
+        if not dn:
+            continue
+        if dn in exact_map and pd.notna(exact_map[dn]) and str(exact_map[dn]).strip() != "":
+            results.append({
                 "unique_key": row.get("unique_key", ""),
-                "detalle": row["detalle"],
-                "detalle_norm": detalle_norm,
-                "sugerida": exact_match[0],
+                "detalle": row.get("detalle", ""),
+                "detalle_norm": dn,
+                "sugerida": exact_map[dn],
                 "fuente": "Mapa exacto",
                 "confianza": 1.0,
                 "aceptar": False,
-                "manual": ""
+                "manual": "",
             })
-            continue
-        
-        # 2. Historial dominante por detalle_norm (≥70%) usando CTE para evitar window functions in HAVING
-        if isinstance(conn, dict) and conn.get("pg"):
-            engine = conn["engine"]
-            with engine.connect() as cx:
-                result = cx.execute(text("""
+        else:
+            pending_dns.append(dn)
+
+    pending_dns = sorted(set([dn for dn in pending_dns if dn]))
+
+    # 2) Para los pendiente: calcular categoría dominante por detalle_norm en lote
+    dom_map = {}
+    if pending_dns:
+        try:
+            if isinstance(conn, dict) and conn.get("pg"):
+                engine = conn["engine"]
+                with engine.connect() as cx:
+                    params = {f"dn{i}": v for i, v in enumerate(pending_dns)}
+                    placeholders = ", ".join([f":dn{i}" for i in range(len(pending_dns))])
+                    q = text(f"""
+                        SELECT detalle_norm, categoria, cnt, total,
+                               CASE WHEN total > 0 THEN (cnt * 100.0) / total ELSE 0 END AS pct
+                        FROM (
+                            SELECT detalle_norm, categoria, COUNT(*) AS cnt,
+                                   SUM(COUNT(*)) OVER (PARTITION BY detalle_norm) AS total,
+                                   ROW_NUMBER() OVER (PARTITION BY detalle_norm ORDER BY COUNT(*) DESC) AS rn
+                            FROM movimientos
+                            WHERE detalle_norm IN ({placeholders})
+                              AND categoria IS NOT NULL
+                              AND categoria != 'Sin categoría'
+                            GROUP BY detalle_norm, categoria
+                        ) s
+                        WHERE rn = 1
+                    """)
+                    rows = cx.execute(q, params).fetchall()
+                    for r in rows:
+                        dn, cat, cnt, total, pct = r
+                        if pct is None:
+                            pct = 0.0
+                        dom_map[dn] = (cat, float(pct))
+            else:
+                # SQLite: equivalente sin window functions usando CTEs y join
+                placeholders = ",".join(["?"] * len(pending_dns))
+                q = f"""
                     WITH filt AS (
-                        SELECT categoria
+                        SELECT detalle_norm, categoria
                         FROM movimientos
-                        WHERE detalle_norm = :dn
+                        WHERE detalle_norm IN ({placeholders})
                           AND categoria IS NOT NULL
                           AND categoria != 'Sin categoría'
                     ),
                     stats AS (
-                        SELECT categoria, COUNT(*) AS cnt
+                        SELECT detalle_norm, categoria, COUNT(*) AS cnt
                         FROM filt
-                        GROUP BY categoria
+                        GROUP BY detalle_norm, categoria
                     ),
-                    tot AS (
-                        SELECT COUNT(*) AS total FROM filt
+                    total AS (
+                        SELECT detalle_norm, SUM(cnt) AS total
+                        FROM stats
+                        GROUP BY detalle_norm
+                    ),
+                    ranked AS (
+                        SELECT s.detalle_norm, s.categoria, s.cnt, t.total
+                        FROM stats s JOIN total t USING(detalle_norm)
                     )
-                    SELECT s.categoria,
-                           s.cnt,
-                           (s.cnt * 100.0) / NULLIF(t.total, 0) AS pct
-                    FROM stats s CROSS JOIN tot t
-                    WHERE (s.cnt * 100.0) / NULLIF(t.total, 0) >= 70
-                    ORDER BY s.cnt DESC
-                    LIMIT 1
-                """), {"dn": detalle_norm})
-                hist_match = result.fetchone()
-        else:
-            cur = conn.execute("""
-                WITH filt AS (
-                    SELECT categoria
-                    FROM movimientos
-                    WHERE detalle_norm = ?
-                      AND categoria IS NOT NULL
-                      AND categoria != 'Sin categoría'
-                ),
-                stats AS (
-                    SELECT categoria, COUNT(*) AS cnt FROM filt GROUP BY categoria
-                ),
-                tot AS (
-                    SELECT COUNT(*) AS total FROM filt
-                )
-                SELECT s.categoria,
-                       s.cnt,
-                       (s.cnt * 100.0) / CASE WHEN t.total = 0 THEN NULL ELSE t.total END AS pct
-                FROM stats s, tot t
-                WHERE (s.cnt * 100.0) / CASE WHEN t.total = 0 THEN NULL ELSE t.total END >= 70
-                ORDER BY s.cnt DESC
-                LIMIT 1
-            """, (detalle_norm,))
-            hist_match = cur.fetchone()
-        
-        if hist_match:
-            suggestions.append({
-                "unique_key": row.get("unique_key", ""),
-                "detalle": row["detalle"],
-                "detalle_norm": detalle_norm,
-                "sugerida": hist_match[0],
-                "fuente": "Historial dominante",
-                "confianza": 0.8,
-                "aceptar": False,
-                "manual": ""
-            })
+                    SELECT r1.detalle_norm,
+                           r1.categoria,
+                           r1.cnt,
+                           r1.total,
+                           (r1.cnt * 100.0) / NULLIF(r1.total, 0) AS pct
+                    FROM ranked r1
+                    JOIN (
+                        SELECT detalle_norm, MAX(cnt) AS max_cnt FROM ranked GROUP BY detalle_norm
+                    ) m
+                    ON r1.detalle_norm = m.detalle_norm AND r1.cnt = m.max_cnt
+                """
+                rows = conn.execute(q, pending_dns).fetchall()
+                # Si hay empates, se devuelven múltiples filas; elegimos la primera por orden de aparición
+                seen = set()
+                for r in rows:
+                    dn, cat, cnt, total, pct = r
+                    if dn in seen:
+                        continue
+                    seen.add(dn)
+                    if pct is None:
+                        pct = 0.0
+                    dom_map[dn] = (cat, float(pct))
+        except Exception:
+            dom_map = {}
+
+    # Armar resultados finales
+    for _, row in sug_df.iterrows():
+        dn = str(row.get("detalle_norm") or "")
+        if not dn:
             continue
-        
-        # 3. Reglas por regex/keywords (confianza 0.7)
-        # Aquí podrías implementar reglas más sofisticadas
-        suggestions.append({
+        if any(r.get("detalle_norm") == dn and r.get("unique_key") == row.get("unique_key", "") for r in results):
+            continue
+        cat_pct = dom_map.get(dn)
+        if cat_pct:
+            cat, pct = cat_pct
+            if pd.notna(cat) and str(cat).strip() != "" and float(pct) >= 70.0:
+                results.append({
+                    "unique_key": row.get("unique_key", ""),
+                    "detalle": row.get("detalle", ""),
+                    "detalle_norm": dn,
+                    "sugerida": cat,
+                    "fuente": "Historial dominante",
+                    "confianza": 0.8,
+                    "aceptar": False,
+                    "manual": "",
+                })
+                continue
+        # 3) Sin sugerencia
+        results.append({
             "unique_key": row.get("unique_key", ""),
-            "detalle": row["detalle"],
-            "detalle_norm": detalle_norm,
+            "detalle": row.get("detalle", ""),
+            "detalle_norm": dn,
             "sugerida": "Sin categoría",
             "fuente": "Sin sugerencia",
             "confianza": 0.0,
             "aceptar": False,
-            "manual": ""
+            "manual": "",
         })
-    
-    return pd.DataFrame(suggestions)
+
+    return pd.DataFrame(results)
 
 
 # Inicializar DB
