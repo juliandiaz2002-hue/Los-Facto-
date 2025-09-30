@@ -33,6 +33,30 @@ st.title("Dashboard de Facto$")
 _qp = st.query_params
 MOBILE = str(_qp.get("mobile", "0")).lower() in ("1", "true", "yes")
 
+# Autodetección móvil: si no viene el parámetro, lo agregamos si la pantalla es chica
+if not MOBILE:
+    st.markdown(
+        """
+        <script>
+        (function(){
+          try{
+            var params = new URLSearchParams(window.location.search);
+            if(!params.has('mobile')){
+              var isSmall = Math.min(window.screen.width, window.screen.height) <= 480 || /iPhone|Android/i.test(navigator.userAgent);
+              if(isSmall){
+                params.set('mobile','1');
+                var base = window.location.origin + window.location.pathname;
+                var hash = window.location.hash || '';
+                window.location.replace(base + '?' + params.toString() + hash);
+              }
+            }
+          }catch(e){}
+        })();
+        </script>
+        """,
+        unsafe_allow_html=True,
+    )
+
 # Selector de tema (Claro por defecto)
 if "theme" not in st.session_state:
     st.session_state["theme"] = "Claro"
@@ -975,12 +999,12 @@ if not df_plot.empty:
 
     st.markdown("### Distribución de Gastos por Categoría")
 
-    # Donut más compacto y con borde más grueso
+# Donut más compacto y con borde más grueso
     chart_donut = (
         alt.Chart(cat_agg)
         .mark_arc(
-            innerRadius=80,
-            outerRadius=140,
+            innerRadius=(70 if MOBILE else 80),
+            outerRadius=(120 if MOBILE else 140),
             cornerRadius=3,
             padAngle=0.005,
             stroke="#0b1220",
@@ -998,12 +1022,12 @@ if not df_plot.empty:
                 alt.Tooltip("total:Q", format=",.0f", title="Total")
             ],
         )
-        .properties(width=420, height=360)
+        .properties(width=(340 if MOBILE else 420), height=(300 if MOBILE else 360))
     )
 
     # Texto centrado con el total
     total_sum = float(cat_agg["total"].sum()) if not cat_agg.empty else 0.0
-    center_text_df = pd.DataFrame({"x": [210], "y": [180], "txt": [f"${total_sum:,.0f}"]})
+    center_text_df = pd.DataFrame({"x": [170 if MOBILE else 210], "y": [150 if MOBILE else 180], "txt": [f"${total_sum:,.0f}"]})
     center_text = (
         alt.Chart(center_text_df)
         .mark_text(fontSize=22, fontWeight="bold", color="#e5e7eb")
@@ -1108,6 +1132,8 @@ with col_left:
             df_plot.groupby("categoria").size().reset_index(name="veces")
                   .sort_values("veces", ascending=True)  # ascendente para horizontal
         )
+        if MOBILE and len(freq) > 12:
+            freq = freq.tail(12)
         # Escala/ticks enteros para eje numérico (eje X ahora)
         max_val = freq["veces"].max()
         max_veces = 1 if pd.isna(max_val) or max_val is None else int(max_val)
@@ -1136,7 +1162,7 @@ with col_left:
                 ],
             )
             .properties(
-                height=max(240, 20 * max(5, len(freq))),  # alto dinámico según nº de categorías
+                height=(max(200, 18 * max(5, len(freq))) if MOBILE else max(240, 20 * max(5, len(freq)))),
                 title={
                     "text": "Frecuencia por Categoría",
                     "fontSize": 14,
@@ -1159,13 +1185,13 @@ with col_right:
         dow_agg.rename(columns={"_amt": "total"}, inplace=True)
         chart_dow = (
             alt.Chart(dow_agg)
-            .mark_line(point={"size": 60}, stroke="#4e79a7", strokeWidth=3)
+            .mark_line(point={"size": (40 if MOBILE else 60)}, stroke="#4e79a7", strokeWidth=(2 if MOBILE else 3))
             .encode(
                 x=alt.X("dow:N", sort=["Lun","Mar","Mié","Jue","Vie","Sáb","Dom"], title="Día de la Semana"),
                 y=alt.Y("total:Q", title="Total de Gastos", axis=alt.Axis(format=",.0f")),
                 tooltip=[alt.Tooltip("dow:N", title="Día"), alt.Tooltip("total:Q", format=",.0f", title="Total")],
             )
-            .properties(height=300, title={"text": "Gastos por Día de la Semana", "fontSize": 14, "fontWeight": "bold", "color": "#133c60"})
+            .properties(height=(240 if MOBILE else 300), title={"text": "Gastos por Día de la Semana", "fontSize": 14, "fontWeight": "bold", "color": "#133c60"})
             .configure_view(stroke=None)
             .configure_axis(grid=False)
         )
@@ -1181,6 +1207,8 @@ if not df_plot.empty:
               .rename(columns={'_amt': 'ticket_prom'})
               .sort_values("ticket_prom", ascending=True)
     )
+    if MOBILE and len(avg) > 12:
+        avg = avg.tail(12)
 
     # Valores seguros para eje X (evita NaN/Inf y pasos 0)
     max_raw = 0.0 if avg.empty else avg["ticket_prom"].max()
@@ -1224,7 +1252,7 @@ if not df_plot.empty:
             ],
         )
         .properties(
-            height=max(260, 22 * max(5, len(avg))),
+            height=(max(220, 20 * max(5, len(avg))) if MOBILE else max(260, 22 * max(5, len(avg)))),
             title={"text": "Ticket Promedio por Categoría", "fontSize": 14, "fontWeight": "bold", "color": "#133c60"}
         )
         .configure_view(stroke=None)
@@ -1328,7 +1356,13 @@ if sel_mes and sel_mes != "Todos" and not df_base_compare.empty:
 
 
 # Sugerencias de categoría
-st.markdown("### Sugerencias de categoría")
+title_sug = "### Sugerencias de categoría"
+if MOBILE:
+    with st.expander("Sugerencias de categoría (toca para ver)"):
+        st.markdown(title_sug)
+        # el resto de la sección continúa igual
+else:
+    st.markdown(title_sug)
 # Guard flag para auto-aplicación de sugerencias de alta confianza
 if "auto_apply_suggestions_done" not in st.session_state:
     st.session_state["auto_apply_suggestions_done"] = False
