@@ -309,8 +309,10 @@ def load_df(file):
         except Exception:
             pass
         df = pd.read_csv(file)
-    # Limpiar nombres de columnas (eliminar espacios y caracteres especiales)
+    # Limpiar nombres de columnas (eliminar espacios, BOM y caracteres especiales)
     df.columns = df.columns.str.strip()
+    # Remover BOM (Byte Order Mark) que puede estar al inicio de la primera columna
+    df.columns = df.columns.str.replace('\ufeff', '', regex=False)
     
     # Debug detallado: mostrar las columnas detectadas
     st.write("Columnas detectadas en el CSV:", list(df.columns))
