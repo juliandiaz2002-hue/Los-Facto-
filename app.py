@@ -309,6 +309,13 @@ def load_df(file):
         except Exception:
             pass
         df = pd.read_csv(file)
+    # Limpiar nombres de columnas (eliminar espacios y caracteres especiales)
+    df.columns = df.columns.str.strip()
+    
+    # Debug: mostrar las columnas detectadas
+    st.write("Columnas detectadas en el CSV:", list(df.columns))
+    st.write("Columnas requeridas:", list(REQUIRED_COLS))
+    
     missing = REQUIRED_COLS - set(df.columns)
     if missing:
         st.error(f"Faltan columnas requeridas: {sorted(missing)}")
