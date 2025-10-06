@@ -312,9 +312,22 @@ def load_df(file):
     # Limpiar nombres de columnas (eliminar espacios y caracteres especiales)
     df.columns = df.columns.str.strip()
     
-    # Debug: mostrar las columnas detectadas
+    # Debug detallado: mostrar las columnas detectadas
     st.write("Columnas detectadas en el CSV:", list(df.columns))
     st.write("Columnas requeridas:", list(REQUIRED_COLS))
+    
+    # Debug más detallado: verificar cada columna individualmente
+    st.write("=== DEBUG DETALLADO ===")
+    for col in df.columns:
+        st.write(f"Columna detectada: '{col}' (tipo: {type(col)}, repr: {repr(col)})")
+        st.write(f"  - Está en REQUIRED_COLS? {col in REQUIRED_COLS}")
+        st.write(f"  - Comparación exacta con 'fecha': {col == 'fecha'}")
+        st.write(f"  - Longitud: {len(col)}")
+    
+    st.write("=== REQUIRED_COLS ===")
+    for col in REQUIRED_COLS:
+        st.write(f"Columna requerida: '{col}' (tipo: {type(col)}, repr: {repr(col)})")
+        st.write(f"  - Longitud: {len(col)}")
     
     missing = REQUIRED_COLS - set(df.columns)
     if missing:
