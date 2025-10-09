@@ -726,7 +726,10 @@ with st.sidebar:
     df_months = df.copy()
     df_months["mes"] = df_months["fecha"].dt.to_period("M").astype(str)
     months = sorted([m for m in df_months["mes"].dropna().unique().tolist()])
-    sel_mes = st.selectbox("Mes", options=["Todos"] + months, index=0, key="month_filter")
+    # Mes actual como predeterminado si existe en los datos
+    cur_month = pd.Timestamp.today().strftime("%Y-%m")
+    default_idx = (months.index(cur_month) + 1) if (cur_month in months) else 0
+    sel_mes = st.selectbox("Mes", options=["Todos"] + months, index=default_idx, key="month_filter")
     st.caption("Si eliges un **Mes**, solo la vista principal se filtra a ese mes. La comparación mensual usa el set completo (o el rango de fechas si lo defines abajo).")
     min_fecha, max_fecha = df["fecha"].min(), df["fecha"].max()
     if pd.isna(min_fecha) or pd.isna(max_fecha):
