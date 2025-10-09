@@ -313,24 +313,7 @@ def load_df(file):
     df.columns = df.columns.str.strip()
     # Remover BOM (Byte Order Mark) que puede estar al inicio de la primera columna
     df.columns = df.columns.str.replace('\ufeff', '', regex=False)
-    
-    # Debug detallado: mostrar las columnas detectadas
-    st.write("Columnas detectadas en el CSV:", list(df.columns))
-    st.write("Columnas requeridas:", list(REQUIRED_COLS))
-    
-    # Debug más detallado: verificar cada columna individualmente
-    st.write("=== DEBUG DETALLADO ===")
-    for col in df.columns:
-        st.write(f"Columna detectada: '{col}' (tipo: {type(col)}, repr: {repr(col)})")
-        st.write(f"  - Está en REQUIRED_COLS? {col in REQUIRED_COLS}")
-        st.write(f"  - Comparación exacta con 'fecha': {col == 'fecha'}")
-        st.write(f"  - Longitud: {len(col)}")
-    
-    st.write("=== REQUIRED_COLS ===")
-    for col in REQUIRED_COLS:
-        st.write(f"Columna requerida: '{col}' (tipo: {type(col)}, repr: {repr(col)})")
-        st.write(f"  - Longitud: {len(col)}")
-    
+
     missing = REQUIRED_COLS - set(df.columns)
     if missing:
         st.error(f"Faltan columnas requeridas: {sorted(missing)}")
@@ -2053,6 +2036,81 @@ chart_mensual = (
     .configure_axis(grid=False)
 )
 st.altair_chart(chart_mensual, use_container_width=True)
+
+# === Proyección de gastos del mes (por categoría) ===
+st.markdown("### Proyección de gastos del mes")
+try:
+    # Base sin filtros de UI para calcular promedios mensuales históricos
+    base_hist = df_base_compare.copy()
+    if not base_hist.empty:
+        base_hist["mes"] = base_hist["fecha"].dt.to_period("M").astype(str)
+        # Agregado mensual por categoría
+        amt_c = "monto" if "monto" in base_hist.columns else "monto_real_plot"
+        base_hist_amt = base_hist.assign(_amt=np.abs(pd.to_numeric(base_hist[amt_c], errors="coerce").fillna(0)))
+        monthly_by_cat = (
+            base_hist_amt.groupby(["categoria", "mes"])['_amt']
+            .sum().reset_index().rename(columns={'_amt': 'total_mes'})
+        )
+
+        # Reglas para incluir categorías: al menos 2 meses y variabilidad razonable
+        stats = monthly_by_cat.groupby("categoria")["total_mes"].agg(["count", "mean", "std"]).reset_index()
+        stats.rename(columns={"count": "num_meses", "mean": "prom_mensual", "std": "desv"}, inplace=True)
+
+        # Filtro: 2+ meses y coeficiente de variación <= 1.0 (desv <= media)
+        # También descartar categorías con media muy baja (ruido) p.e. < 3.000
+        stats["cv"] = stats.apply(lambda r: (r["desv"] / r["prom_mensual"]) if r["prom_mensual"] > 0 else np.inf, axis=1)
+        valid = stats[(stats["num_meses"] >= 2) & (stats["prom_mensual"] >= 3000) & (stats["cv"] <= 1.0)].copy()
+
+        # Excluir categorías claramente ocasionales por nombre (heurística simple)
+        blacklist_words = {"viaje", "lima", "vacaciones"}
+        def is_blacklisted(cat: str) -> bool:
+            s = str(cat or "").lower()
+            return any(w in s for w in blacklist_words)
+        valid = valid[~valid["categoria"].apply(is_blacklisted)]
+
+        # Proyección total por categoría = promedio mensual histórico
+        proj = valid[["categoria", "prom_mensual"]].sort_values("prom_mensual", ascending=False)
+
+        # Acumulado del mes actual por categoría (visible o rango seleccionado)
+        cur = dfv.copy()
+        cur_amt_col = "monto" if "monto" in cur.columns else "monto_real_plot"
+        cur_agg = (
+            cur.assign(_amt=np.abs(pd.to_numeric(cur[cur_amt_col], errors="coerce").fillna(0)))
+               .groupby("categoria")['_amt']
+               .sum().reset_index().rename(columns={'_amt': 'actual_mes'})
+        )
+
+        # Merge proyección vs actual y calcular restante sugerido
+        proj_view = proj.merge(cur_agg, on="categoria", how="left").fillna({"actual_mes": 0.0})
+        proj_view["restante_estimado"] = (proj_view["prom_mensual"] - proj_view["actual_mes"]).clip(lower=0)
+
+        # Totales
+        total_proj = float(proj_view["prom_mensual"].sum())
+        total_actual = float(proj_view["actual_mes"].sum())
+        total_restante = float(proj_view["restante_estimado"].sum())
+
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.metric("Proyección mensual (categorías estables)", f"${total_proj:,.0f}")
+        with c2:
+            st.metric("Acumulado mes actual (esas categorías)", f"${total_actual:,.0f}")
+        with c3:
+            st.metric("Restante estimado del mes", f"${total_restante:,.0f}")
+
+        # Tabla detallada
+        st.dataframe(
+            proj_view.rename(columns={
+                "categoria": "Categoría",
+                "prom_mensual": "Promedio mensual",
+                "actual_mes": "Actual mes",
+                "restante_estimado": "Restante estimado",
+            }),
+            use_container_width=True,
+        )
+    else:
+        st.info("Aún no hay suficientes datos para proyectar.")
+except Exception as _proj_e:
+    st.warning(f"No se pudo calcular la proyección: {_proj_e}")
 
 # Botón "Reparar montos" para sincronizar monto = abs(monto_real) para "Gasto"
 st.markdown("### Herramientas de mantenimiento")
