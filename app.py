@@ -2052,14 +2052,28 @@ try:
             .sum().reset_index().rename(columns={'_amt': 'total_mes'})
         )
 
-        # Reglas para incluir categorías: al menos 2 meses y variabilidad razonable
+        # Reglas para incluir categorías
+        # 1) Al menos 2 meses históricos
+        # 2) Si la categoría está presente en TODOS los últimos K meses (K=3), se incluye SIEMPRE
+        # 3) Si no cumple (2), entonces exigir variabilidad razonable (cv <= 1.0) y media >= 3.000
         stats = monthly_by_cat.groupby("categoria")["total_mes"].agg(["count", "mean", "std"]).reset_index()
         stats.rename(columns={"count": "num_meses", "mean": "prom_mensual", "std": "desv"}, inplace=True)
 
-        # Filtro: 2+ meses y coeficiente de variación <= 1.0 (desv <= media)
-        # También descartar categorías con media muy baja (ruido) p.e. < 3.000
+        # Determinar presencia por categoría en los últimos K meses
+        months_sorted = sorted(monthly_by_cat["mes"].unique())
+        k = 3 if len(months_sorted) >= 3 else len(months_sorted)
+        last_k = set(months_sorted[-k:]) if k > 0 else set()
+        cat_to_months = monthly_by_cat.groupby("categoria")["mes"].apply(lambda s: set(s.tolist())).to_dict()
+        stats["presente_ultimos_k"] = stats["categoria"].apply(lambda c: last_k.issubset(cat_to_months.get(c, set())) if last_k else False)
+
+        # Coeficiente de variación (cv)
         stats["cv"] = stats.apply(lambda r: (r["desv"] / r["prom_mensual"]) if r["prom_mensual"] > 0 else np.inf, axis=1)
-        valid = stats[(stats["num_meses"] >= 2) & (stats["prom_mensual"] >= 3000) & (stats["cv"] <= 1.0)].copy()
+
+        # Construir conjunto válido
+        base_mask = stats["num_meses"] >= 2
+        stable_mask = stats["presente_ultimos_k"]
+        conservative_mask = (stats["prom_mensual"] >= 3000) & (stats["cv"] <= 1.0)
+        valid = stats[base_mask & (stable_mask | conservative_mask)].copy()
 
         # Excluir categorías claramente ocasionales por nombre (heurística simple)
         blacklist_words = {"viaje", "lima", "vacaciones"}
