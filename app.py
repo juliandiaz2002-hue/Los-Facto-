@@ -299,6 +299,35 @@ MONTH_NAMES = {
     "09": "Septiembre", "10": "Octubre", "11": "Noviembre", "12": "Diciembre"
 }
 
+def _parse_fecha_column(series, date_format: str = "YYYY-MM-DD"):
+    """Parsea fechas según formato: YYYY-MM-DD (año-mes-día) o YYYY-DD-MM (año-día-mes)."""
+    if series is None or (hasattr(series, "empty") and series.empty):
+        return pd.Series(dtype="datetime64[ns]")
+    formats_ymd = ["%Y-%m-%d", "%Y/%m/%d", "%d-%m-%Y", "%d/%m/%Y", "%d.%m.%Y", "%m/%d/%Y"]
+    formats_ydm = ["%Y-%d-%m", "%Y/%d/%m"]  # año, día, mes (ej: 2026-08-02 = 2 agosto)
+    if date_format == "YYYY-DD-MM":
+        fmts = formats_ydm + formats_ymd
+    else:
+        fmts = formats_ymd + formats_ydm
+    result = []
+    for v in series:
+        if pd.isna(v) or (isinstance(v, str) and v.strip() == "") or v is None:
+            result.append(pd.NaT)
+            continue
+        s = str(v).strip()
+        parsed = pd.NaT
+        for fmt in fmts:
+            try:
+                parsed = pd.to_datetime(s, format=fmt, errors="raise")
+                break
+            except Exception:
+                pass
+        if pd.isna(parsed):
+            parsed = pd.to_datetime(s, dayfirst=True, errors="coerce")
+        result.append(parsed)
+    return pd.Series(result, index=series.index, dtype="datetime64[ns]")
+
+
 def _detect_encoding(raw_bytes: bytes) -> str:
     """Detect encoding for CSV (supports Latin-1, UTF-8, Windows-1252)."""
     try:
@@ -313,7 +342,7 @@ def _detect_encoding(raw_bytes: bytes) -> str:
 
 
 @st.cache_data(show_spinner=False)
-def load_df(file):
+def load_df(file, date_format: str = "YYYY-MM-DD"):
     # Leer contenido (bancos usan Latin-1, UTF-8, CP1252)
     raw = file.read() if hasattr(file, "read") else file
     if isinstance(raw, str):
@@ -361,9 +390,9 @@ def load_df(file):
         st.error(f"Faltan columnas requeridas: {sorted(missing)}")
         st.stop()
     
-    # Fechas flexibles: DD/MM/YYYY, DD-MM-YYYY, YYYY-MM-DD, etc.
+    # Fechas flexibles según formato seleccionado
     _fecha_raw = df.get("fecha")
-    df["fecha"] = pd.to_datetime(_fecha_raw, dayfirst=True, errors="coerce")
+    df["fecha"] = _parse_fecha_column(_fecha_raw, date_format)
     
     def _clean_amount(x):
         if pd.isna(x):
@@ -636,6 +665,15 @@ if not categories:
     replace_categories(conn, DEFAULT_CATEGORIES)
     categories = DEFAULT_CATEGORIES[:]
 
+# Formato de fecha en CSV: año-mes-día vs año-día-mes
+date_format = st.selectbox(
+    "Formato de fecha en tu CSV",
+    options=["YYYY-MM-DD", "YYYY-DD-MM"],
+    format_func=lambda x: "Año-Mes-Día (2026-02-08 = 8 feb)" if x == "YYYY-MM-DD" else "Año-Día-Mes (2026-08-02 = 2 ago)",
+    key="csv_date_format",
+)
+st.caption("Si tus fechas están como año-día-mes, elige la segunda opción.")
+
 uploaded = st.file_uploader(
     "Sube tu CSV (fecha, detalle, monto — o columnas equivalentes: glosa, cargo, etc.)",
     type=["csv"],
@@ -643,7 +681,7 @@ uploaded = st.file_uploader(
 )
 
 if uploaded is not None:
-    df_in = load_df(uploaded)
+    df_in = load_df(uploaded, date_format=date_format)
 
     # Forzar todo como Gasto (convierte montos a negativo) — SIEMPRE ACTIVO
     # usar monto_cartola como base inmutable; solo firmamos el signo visible
