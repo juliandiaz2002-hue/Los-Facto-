@@ -59,17 +59,6 @@ if not MOBILE:
         unsafe_allow_html=True,
     )
 
-# Selector de tema (Claro por defecto)
-if "theme" not in st.session_state:
-    st.session_state["theme"] = "Claro"
-with st.sidebar:
-    st.session_state["theme"] = st.selectbox(
-        "Tema",
-        options=["Claro", "Oscuro"],
-        index=(0 if st.session_state["theme"] == "Claro" else 1),
-        help="Cambia entre tema claro y oscuro"
-    )
-
 # CSS responsive básico para pantallas pequeñas
 st.markdown(
     """
@@ -88,8 +77,8 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Variables de tema y activación (Claro/Oscuro)
-_theme = st.session_state.get("theme", "Claro")
+# Variables de tema y activación (fijamos el estilo claro por defecto)
+_theme = "Claro"
 st.markdown(
     f"""
 <style>
@@ -665,20 +654,21 @@ if not categories:
     replace_categories(conn, DEFAULT_CATEGORIES)
     categories = DEFAULT_CATEGORIES[:]
 
-# Formato de fecha en CSV: año-mes-día vs año-día-mes
-date_format = st.selectbox(
-    "Formato de fecha en tu CSV",
-    options=["YYYY-MM-DD", "YYYY-DD-MM"],
-    format_func=lambda x: "Año-Mes-Día (2026-02-08 = 8 feb)" if x == "YYYY-MM-DD" else "Año-Día-Mes (2026-08-02 = 2 ago)",
-    key="csv_date_format",
-)
-st.caption("Si tus fechas están como año-día-mes, elige la segunda opción.")
-
-uploaded = st.file_uploader(
-    "Sube tu CSV (fecha, detalle, monto — o columnas equivalentes: glosa, cargo, etc.)",
-    type=["csv"],
-    help="Acepta CSV con columnas: fecha/detalle/monto, o glosa/descripcion/cargo/importe. Detección automática de encoding y delimitador.",
-)
+uploaded = None
+with st.sidebar:
+    with st.expander("📂 Cargar movimientos", expanded=False):
+        date_format = st.selectbox(
+            "Formato de fecha en tu CSV",
+            options=["YYYY-MM-DD", "YYYY-DD-MM"],
+            format_func=lambda x: "Año-Mes-Día (2026-02-08 = 8 feb)" if x == "YYYY-MM-DD" else "Año-Día-Mes (2026-08-02 = 2 ago)",
+            key="csv_date_format",
+        )
+        st.caption("Si tus fechas están como año-día-mes, elige la segunda opción.")
+        uploaded = st.file_uploader(
+            "Sube tu CSV (fecha, detalle, monto — o columnas equivalentes: glosa, cargo, etc.)",
+            type=["csv"],
+            help="Acepta CSV con columnas: fecha/detalle/monto, o glosa/descripcion/cargo/importe. Detección automática de encoding y delimitador.",
+        )
 
 if uploaded is not None:
     df_in = load_df(uploaded, date_format=date_format)
@@ -772,7 +762,6 @@ if df.empty:
 
 # Filtros en sidebar
 with st.sidebar:
-    mobile_chk = st.checkbox("📱 Modo móvil", value=MOBILE, help="Optimiza la UI para pantallas pequeñas")
     st.header("Filtros")
     q = st.text_input("Buscar en detalle", "", key="search_q")
     # Filtro por mes (además del rango de fechas)
@@ -830,8 +819,6 @@ with st.sidebar:
             st.success(f"'{old_name}' → '{new_name.strip()}' actualizado")
             # Refrescar para recargar df desde la base y aplicar nombre nuevo en la tabla
             st.rerun()
-
-MOBILE = mobile_chk
 # --- Leer valores de filtros desde session_state para uso global ---
 q = st.session_state.get("search_q", "")
 sel_mes = st.session_state.get("month_filter", "Todos")
@@ -876,11 +863,16 @@ if q:
     dfv = dfv[dfv["detalle_norm"].str.contains(q, case=False, na=False)]
     df_base_compare = df_base_compare[df_base_compare["detalle_norm"].str.contains(q, case=False, na=False)]
 
+df_analysis = df_base_compare.copy()
+
 # Rango de fechas (afecta SOLO la vista principal; la comparación mensual usa toda la base)
 if isinstance(rango, tuple) and len(rango) == 2:
-    dfv = dfv[(dfv["fecha"] >= pd.to_datetime(rango[0])) & (dfv["fecha"] <= pd.to_datetime(rango[1]))]
+    start_r, end_r = pd.to_datetime(rango[0]), pd.to_datetime(rango[1])
+    dfv = dfv[(dfv["fecha"] >= start_r) & (dfv["fecha"] <= end_r)]
+    df_analysis = df_analysis[(df_analysis["fecha"] >= start_r) & (df_analysis["fecha"] <= end_r)]
 elif rango:
     dfv = dfv[dfv["fecha"].dt.date == rango]
+    df_analysis = df_analysis[df_analysis["fecha"].dt.date == rango]
 
 # Filtro por mes (solo para la VISTA principal; NO afecta comparación)
 if sel_mes and sel_mes != "Todos":
@@ -899,6 +891,7 @@ sel_cats = st.sidebar.multiselect("Categorías", options=["Todas"] + cat_options
 if sel_cats and "Todas" not in sel_cats:
     dfv = dfv[dfv["categoria"].isin(sel_cats)]
     df_base_compare = df_base_compare[df_base_compare["categoria"].isin(sel_cats)]
+    df_analysis = df_analysis[df_analysis["categoria"].isin(sel_cats)]
 
 # Construir df para gráficos, aplicando borradores de edición (sin necesidad de guardar)
 draft_key = "draft_table_v1"
@@ -1009,10 +1002,13 @@ with col3:
 st.markdown("---")
 st.markdown("#### 🧠 Insights rápidos")
 try:
-    # Mayor variación mensual reciente
-    _maux = df_plot.copy()
-    _maux["mes"] = _maux["fecha"].dt.to_period("M").astype(str)
-    _amtc = "monto" if "monto" in _maux.columns else "monto_real_plot"
+    _maux = df_analysis.copy()
+    if not _maux.empty:
+        _maux["mes"] = _maux["fecha"].dt.to_period("M").astype(str)
+    amt_candidates = ["monto", "monto_real", "monto_real_plot"]
+    _amtc = next((c for c in amt_candidates if c in _maux.columns), None)
+    if _amtc is None:
+        raise ValueError("No hay columna de monto para análisis mensual")
     _series = _maux.assign(_a=np.abs(pd.to_numeric(_maux[_amtc], errors="coerce").fillna(0))).groupby("mes")["_a"].sum().sort_index()
     delta_text = "n/a"
     if len(_series) >= 2:
@@ -1524,16 +1520,14 @@ if not dfv.empty:
     
     st.markdown("---")
 
+MANUAL_ROW_KEY = "__manual__"
 display_cols = [
-    "◼",
-    "id",
     "fecha",
     "detalle",
-    "tipo",
     "monto",  # editable real
     "categoria",
     "nota_usuario",
-    "unique_key",  # para poder detectar deletions
+    "unique_key",  # para detectar eliminaciones
 ]
 existing_cols = [c for c in display_cols if c in dfv.columns or c == "monto"]
 
@@ -1558,44 +1552,8 @@ if "nota_usuario" not in df_view.columns:
 else:
     df_view["nota_usuario"] = df_view["nota_usuario"].fillna("")
 
-# Añadir columna de indicador visual por categoría
 df_table_cols = [c for c in existing_cols if c in df_view.columns]
 df_table = df_view[df_table_cols].copy()
-# Indicador de color por categoría (emojis cuadrados) para facilitar el escaneo
-_base_emojis = ["🟥","🟧","🟨","🟩","🟦","🟪","🟫","⬛"]
-def _hex_to_rgb(_h):
-    _h = (_h or "").lstrip("#")
-    if len(_h) == 3:
-        _h = "".join([c*2 for c in _h])
-    try:
-        return tuple(int(_h[i:i+2], 16) for i in (0,2,4))
-    except Exception:
-        return (128,128,128)
-def _emoji_for_hex(_h):
-    r,g,b = _hex_to_rgb(_h)
-    # heurística simple por canal dominante
-    if r > 200 and g < 100 and b < 100: return "🟥"
-    if r > 200 and g > 120 and b < 60:  return "🟧"
-    if r > 200 and g > 200 and b < 120: return "🟨"
-    if g > 160 and r < 120 and b < 120: return "🟩"
-    if b > 160 and r < 120 and g < 160: return "🟦"
-    if r > 150 and b > 150 and g < 140: return "🟪"
-    if r > 120 and g < 90 and b < 90:   return "🟫"
-    return "⬛"
-_indicator = []
-if "categoria" in df_view.columns:
-    for _cat in df_view["categoria"].fillna(""):
-        col_hex = colors_by_category.get(_cat, "#9ca3af")
-        _indicator.append(_emoji_for_hex(col_hex))
-else:
-    _indicator = ["⬛"] * len(df_view)
-df_table.insert(0, "◼", _indicator)
-# === Inline delete checkbox (solo UI, sin lógica aún) ===
-if "eliminar" not in df_table.columns:
-    df_table["eliminar"] = False
-# mover la columna al frente para mejor UX
-_cols_order = ["eliminar"] + [c for c in df_table.columns if c != "eliminar"]
-df_table = df_table[_cols_order]
 
 # Mantener cambios no guardados entre reruns (por gestión de categorías, etc.)
 draft_key = "draft_table_v1"
@@ -1612,7 +1570,7 @@ if draft_key in st.session_state:
         df_table = base.reset_index()
 
 # Controles de ordenamiento (click-en-header aún no es fiable en st.data_editor)
-sort_candidates = ["fecha", "monto", "categoria", "detalle", "id"]
+sort_candidates = ["fecha", "monto", "categoria", "detalle"]
 sort_cols = [c for c in sort_candidates if c in df_table.columns]
 
 if sort_cols:
@@ -1639,459 +1597,346 @@ if sort_cols:
     else:
         df_table = df_table.sort_values(by=sort_by, ascending=not sort_desc, kind="mergesort")
 
-# Formulario de edición mejorado
-with st.form("editor_form", clear_on_submit=False):
-    st.markdown("**✏️ Edita las transacciones y guarda los cambios**")
-    
-    editable = st.data_editor(
-        df_table,
-        num_rows="dynamic",  # permite borrar filas en la propia tabla
-        use_container_width=True,
-        key="tabla_gastos",
-        column_config={
-            "◼": st.column_config.TextColumn(label="", help="Indicador de color de categoría", disabled=True, width="small"),
-            "fecha": st.column_config.DatetimeColumn(
-                format="YYYY-MM-DD",
-                help="Fecha de la transacción"
-            ),
-            "monto": st.column_config.NumberColumn(
-                format="%.0f", 
-                min_value=0.0,
-                help="Monto de la transacción (editable)"
-            ),
-            "categoria": st.column_config.SelectboxColumn(
-                options=categories, 
-                default="Sin categoría",
-                help="Selecciona la categoría"
-            ),
-            "nota_usuario": st.column_config.TextColumn(
-                help="Agrega notas personales"
-            ),
-            "unique_key": st.column_config.TextColumn(
-                disabled=True,
-                help="Identificador único (no editable)"
-            ),
-            "eliminar": st.column_config.CheckboxColumn(
-                label="Eliminar",
-                help="Marca para borrar esta fila",
-                default=False,
-            ),
-        },
-        hide_index=True,
-    )
-    
-    # Botones de acción mejorados
-    col_s, col_d, col_info = st.columns([1, 1, 2])
-    with col_s:
-        save_clicked = st.form_submit_button(
-            "💾 Guardar cambios",
-            help="Guarda todos los cambios en la base de datos",
-            use_container_width=True
-        )
-    with col_d:
-        download_clicked = st.form_submit_button(
-            "📥 Descargar CSV",
-            help="Descarga la tabla actual en formato CSV",
-            use_container_width=True
-        )
-    with col_info:
-        if save_clicked:
-            st.info("🔄 Procesando cambios...")
-        elif download_clicked:
-            st.info("📤 Preparando descarga...")
+manual_row_template = {
+    "fecha": pd.Timestamp.today().normalize(),
+    "detalle": "",
+    "monto": 0.0,
+    "categoria": "Sin categoría",
+    "nota_usuario": "",
+    "unique_key": MANUAL_ROW_KEY,
+}
+df_table_display = pd.concat(
+    [pd.DataFrame([manual_row_template]), df_table],
+    ignore_index=True
+)
+df_table_display["accion"] = ""
+ui_cols = ["accion"] + [c for c in df_table_display.columns if c != "accion"]
+df_table_display = df_table_display[ui_cols]
 
-# --- Eliminación rápida por selección explícita ---
-with st.expander("🗑️ Eliminar filas (selección explícita)"):
-    # Construir etiquetas legibles para elegir filas a borrar
-    _del_source = df_table.copy()
-    def _fmt_row(r):
-        _id = int(r["id"]) if "id" in _del_source.columns and pd.notna(r.get("id")) else None
-        _f = r.get("fecha")
-        try:
-            _f = pd.to_datetime(_f).strftime("%Y-%m-%d")
-        except Exception:
-            _f = str(_f)
-        _d = str(r.get("detalle",""))[:50]
-        _m = pd.to_numeric(r.get("monto"), errors="coerce")
-        _m = float(_m) if pd.notna(_m) else 0.0
-        _uk = r.get("unique_key","")
-        return f"[{_id}] {_f} · {_d} · ${_m:,.0f} · {_uk}"
-    _del_source["__label"] = _del_source.apply(_fmt_row, axis=1)
-    _choices = _del_source["__label"].tolist()
-    sel_rows_labels = st.multiselect("Elige filas a eliminar", _choices, key="quick_delete_choices")
-
-    if st.button("Eliminar seleccionadas", key="quick_delete_button"):
-        _to_del = _del_source[_del_source["__label"].isin(sel_rows_labels)]
-        del_ids = _to_del["id"].dropna().astype(int).tolist() if "id" in _to_del.columns else []
-        del_uks = _to_del["unique_key"].dropna().astype(str).tolist() if "unique_key" in _to_del.columns else []
-
-        # Ejecutar borrado usando helper de DB
-        deleted_q = 0
-        try:
-            deleted_q = delete_transactions(conn, unique_keys=(del_uks or None), ids=(del_ids or None))
-        except Exception as e:
-            st.error(f"Error al eliminar: {e}")
-            deleted_q = 0
-
-        # Tombstones para evitar reingesta futura
-        try:
-            if deleted_q > 0 and (del_uks or del_ids):
-                _uks_to_tomb = set(del_uks)
-
-                # Resolver UKs desde IDs si hiciera falta
-                if del_ids:
-                    try:
-                        if isinstance(conn, dict) and conn.get("pg"):
-                            engine = conn["engine"]
-                            with engine.connect() as cx:
-                                _p = {}
-                                _ph = []
-                                for i, val in enumerate(del_ids):
-                                    k = f"id{i}"
-                                    _p[k] = int(val)
-                                    _ph.append(f":{k}")
-                                q = text(f"SELECT unique_key FROM movimientos WHERE id IN ({', '.join(_ph)})")
-                                res = pd.read_sql_query(q, cx, params=_p)
-                        else:
-                            placeholders = ",".join(["?"] * len(del_ids))
-                            q = f"SELECT unique_key FROM movimientos WHERE id IN ({placeholders})"
-                            res = pd.read_sql_query(q, conn, params=del_ids)
-                        if res is not None and not res.empty:
-                            _uks_to_tomb.update(res["unique_key"].dropna().astype(str).tolist())
-                    except Exception:
-                        pass
-
-                # Insertar tombstones
-                if isinstance(conn, dict) and conn.get("pg"):
-                    engine = conn["engine"]
-                    with engine.begin() as cx:
-                        for uk in _uks_to_tomb:
-                            cx.execute(text("INSERT INTO movimientos_borrados (unique_key) VALUES (:uk) ON CONFLICT (unique_key) DO NOTHING"), {"uk": uk})
-                else:
-                    for uk in _uks_to_tomb:
-                        try:
-                            conn.execute("INSERT OR IGNORE INTO movimientos_borrados (unique_key) VALUES (?)", (uk,))
-                        except Exception:
-                            pass
-                    conn.commit()
-        except Exception as _te:
-            st.caption(f"(No se pudieron registrar tombstones: {_te})")
-
-        if deleted_q > 0:
-            st.success(f"Eliminadas {deleted_q} fila(s).")
+def register_tombstones(conn, unique_keys):
+    clean = [uk for uk in (unique_keys or []) if isinstance(uk, str) and uk.strip()]
+    if not clean:
+        return
+    try:
+        if isinstance(conn, dict) and conn.get("pg"):
+            engine = conn["engine"]
+            with engine.begin() as cx:
+                for uk in clean:
+                    cx.execute(
+                        text("INSERT INTO movimientos_borrados (unique_key) VALUES (:uk) ON CONFLICT (unique_key) DO NOTHING"),
+                        {"uk": uk},
+                    )
         else:
-            st.info("No se eliminaron filas.")
-        st.rerun()
+            for uk in clean:
+                try:
+                    conn.execute("INSERT OR IGNORE INTO movimientos_borrados (unique_key) VALUES (?)", (uk,))
+                except Exception:
+                    pass
+            conn.commit()
+    except Exception as tomb_e:
+        st.caption(f"(No se pudieron registrar tombstones: {tomb_e})")
 
-if save_clicked:
-    # Detectar eliminadas con anti-join por unique_key y por id
-    before_df = df_table[[c for c in ["unique_key","id"] if c in df_table.columns]].copy()
-    after_df = editable[[c for c in ["unique_key","id"] if c in editable.columns]].copy()
-    before_keys = set(before_df.get("unique_key", pd.Series(dtype=str)).dropna().astype(str))
-    after_keys = set(after_df.get("unique_key", pd.Series(dtype=str)).dropna().astype(str))
-    to_delete_keys = list(before_keys - after_keys)
-    before_ids = set(before_df.get("id", pd.Series(dtype=float)).dropna().astype(int).astype(str)) if "id" in before_df.columns else set()
-    after_ids = set(after_df.get("id", pd.Series(dtype=float)).dropna().astype(int).astype(str)) if "id" in after_df.columns else set()
-    to_delete_ids = [int(x) for x in (before_ids - after_ids)]
-
-    # --- Capturar filas marcadas con la casilla "eliminar" y limpiar la columna antes de guardar ---
+def delete_and_track(conn, unique_keys):
+    clean = [uk for uk in (unique_keys or []) if isinstance(uk, str) and uk.strip()]
+    if not clean:
+        return 0
+    deleted = 0
     try:
-        if "eliminar" in editable.columns:
-            _marked = editable[editable["eliminar"] == True]
-            if not _marked.empty:
-                if "unique_key" in _marked.columns:
-                    to_delete_keys = list(set(to_delete_keys) | set(_marked["unique_key"].dropna().astype(str).tolist()))
-                if "id" in _marked.columns:
-                    try:
-                        to_delete_ids = list(sorted(set(to_delete_ids) | set(_marked["id"].dropna().astype(int).tolist())))
-                    except Exception:
-                        pass
-            # Eliminar la columna de control para no romper apply_edits / inserts
-            editable = editable.drop(columns=["eliminar"], errors="ignore")
+        deleted = delete_transactions(conn, unique_keys=clean)
+    except Exception as del_e:
+        st.error(f"No se pudo eliminar: {del_e}")
+        return 0
+    if deleted > 0:
+        register_tombstones(conn, clean)
+    return deleted
+
+def normalize_detalle_for_manual(text_value: str) -> str:
+    s = (text_value or "").strip()
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    s = s.replace("\n", " ").replace("\t", " ")
+    s = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in s)
+    return " ".join(s.upper().split())
+
+# Formulario de edición mejorado
+st.markdown("**✏️ Edita las transacciones y guarda los cambios**")
+st.caption("La primera fila queda reservada para agregar un gasto manual rápido. Completa ahí y guarda para insertarlo.")
+
+editable = st.data_editor(
+    df_table_display,
+    num_rows="dynamic",  # permite borrar filas en la propia tabla
+    use_container_width=True,
+    key="tabla_gastos",
+    column_config={
+        "accion": st.column_config.SelectboxColumn(
+            label="",
+            options=["", "🗑️"],
+            help="Elige 🗑️ para pedir la eliminación inmediata de la fila",
+            width="small",
+        ),
+        "fecha": st.column_config.DatetimeColumn(
+            format="YYYY-MM-DD",
+            help="Fecha de la transacción"
+        ),
+        "detalle": st.column_config.TextColumn(
+            help="Descripción del movimiento"
+        ),
+        "monto": st.column_config.NumberColumn(
+            format="%.0f", 
+            min_value=0.0,
+            help="Monto de la transacción (editable)"
+        ),
+        "categoria": st.column_config.SelectboxColumn(
+            options=categories, 
+            default="Sin categoría",
+            help="Selecciona la categoría"
+        ),
+        "nota_usuario": st.column_config.TextColumn(
+            help="Agrega notas personales"
+        ),
+        "unique_key": st.column_config.TextColumn(
+            disabled=True,
+            help="Identificador único (no editable)"
+        ),
+    },
+    hide_index=True,
+)
+
+col_s, col_d, col_info = st.columns([1, 1, 2])
+with col_s:
+    save_clicked = st.button(
+        "💾 Guardar cambios",
+        help="Guarda todos los cambios en la base de datos",
+        use_container_width=True,
+    )
+with col_d:
+    download_preview = editable.copy().drop(columns=["accion"], errors="ignore")
+    if "unique_key" in download_preview.columns:
+        download_preview = download_preview[download_preview["unique_key"] != MANUAL_ROW_KEY]
+    st.download_button(
+        "📥 Descargar CSV",
+        data=download_preview.to_csv(index=False).encode("utf-8"),
+        file_name="movimientos_enriquecidos.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+with col_info:
+    if save_clicked:
+        st.info("🔄 Procesando cambios...")
+
+# Detectar solicitudes de eliminación inmediata
+delete_requests = pd.DataFrame()
+try:
+    if "accion" in editable.columns:
+        delete_requests = editable[
+            (editable["accion"] == "🗑️")
+            & editable["unique_key"].notna()
+            & (editable["unique_key"] != MANUAL_ROW_KEY)
+        ]
+except Exception:
+    delete_requests = pd.DataFrame()
+
+if not delete_requests.empty:
+    candidate = delete_requests.iloc[0]
+    st.session_state["pending_delete"] = {
+        "unique_key": str(candidate.get("unique_key", "")),
+        "detalle": candidate.get("detalle", ""),
+        "fecha": candidate.get("fecha"),
+        "monto": candidate.get("monto"),
+    }
+    editable.loc[editable["unique_key"] == candidate.get("unique_key"), "accion"] = ""
+
+pending_delete = st.session_state.get("pending_delete")
+if pending_delete:
+    fecha_txt = ""
+    try:
+        fecha_txt = pd.to_datetime(pending_delete.get("fecha")).strftime("%Y-%m-%d")
     except Exception:
-        pass
+        fecha_txt = str(pending_delete.get("fecha") or "")
+    resumen = f"{fecha_txt} · {pending_delete.get('detalle','')}"
+    st.warning(f"¿Eliminar definitivamente **{resumen}**?")
+    col_yes, col_no = st.columns(2)
+    with col_yes:
+        if st.button("Sí, borrar", type="primary"):
+            deleted = delete_and_track(conn, [pending_delete.get("unique_key")])
+            if deleted:
+                st.success("Movimiento eliminado.")
+            st.session_state["pending_delete"] = None
+            st.rerun()
+    with col_no:
+        if st.button("Cancelar"):
+            st.session_state["pending_delete"] = None
+            st.rerun()
+    
+if save_clicked:
+    editable_clean = editable.copy()
+    editable_clean = editable_clean.drop(columns=["accion"], errors="ignore")
+    manual_mask = (
+        editable_clean["unique_key"].isin([None, "", MANUAL_ROW_KEY])
+        if "unique_key" in editable_clean.columns
+        else pd.Series(False, index=editable_clean.index)
+    )
+    manual_rows = editable_clean[manual_mask].copy() if "unique_key" in editable_clean.columns else pd.DataFrame()
+    editable_existing = editable_clean[~manual_mask].copy() if "unique_key" in editable_clean.columns else editable_clean.copy()
 
-    # --- DEBUG: mostrar qué se detectó para elimin ---
-    with st.expander("🧹 Debug eliminación detectada", expanded=False):
-        st.write({
-            "to_delete_keys": to_delete_keys,
-            "to_delete_ids": to_delete_ids,
-            "before_count": len(before_df),
-            "after_count": len(after_df),
-        })
+    before_keys = set(df_table.get("unique_key", pd.Series(dtype=str)).dropna().astype(str))
+    after_keys = set(editable_existing.get("unique_key", pd.Series(dtype=str)).dropna().astype(str))
+    to_delete_keys = sorted(before_keys - after_keys)
 
-    # Resolver unique_keys desde IDs a eliminar (para tombstones)
-    delete_uks_from_ids = []
-    try:
-        if to_delete_ids:
-            if isinstance(conn, dict) and conn.get("pg"):
-                engine = conn["engine"]
-                with engine.connect() as cx:
-                    _params = {}
-                    _ph = []
-                    for i, val in enumerate(to_delete_ids):
-                        k = f"id{i}"
-                        _params[k] = int(val)
-                        _ph.append(f":{k}")
-                    q = text(f"SELECT unique_key FROM movimientos WHERE id IN ({', '.join(_ph)})")
-                    res = pd.read_sql_query(q, cx, params=_params)
-            else:
-                placeholders = ",".join(["?"] * len(to_delete_ids))
-                q = f"SELECT unique_key FROM movimientos WHERE id IN ({placeholders})"
-                res = pd.read_sql_query(q, conn, params=to_delete_ids)
-            if res is not None and not res.empty:
-                delete_uks_from_ids = res["unique_key"].dropna().astype(str).tolist()
-    except Exception as _rid_e:
-        st.caption(f"(No se pudieron resolver unique_keys por id: {_rid_e})")
-
-    all_uks_to_tomb = sorted(set([*(to_delete_keys or []), *delete_uks_from_ids]))
-
-    # Preparar ediciones: solo filas con unique_key (ignoramos filas nuevas)
-    edits = editable.dropna(subset=["unique_key"]).copy()
+    edits = editable_existing.dropna(subset=["unique_key"]).copy()
     edits.rename(columns={"monto": "monto_real"}, inplace=True)
 
-    updated = apply_edits(conn, edits)
+    updated = apply_edits(conn, edits) if not edits.empty else 0
     try:
-        learned = update_categoria_map_from_df(conn, edits)
+        learned = update_categoria_map_from_df(conn, edits) if not edits.empty else 0
         if learned:
-            st.info(f"Aprendidas {learned} reglas de categoría por 'detalle_norm'. Se aplicarán en futuras cargas.")
+            st.info(f"Aprendidas {learned} reglas de categoría por 'detalle_norm'.")
     except Exception:
         pass
 
-    # --- Eliminación persistente con verificación inmediata ---
-    expected_to_delete = (len(to_delete_keys) if to_delete_keys else 0) + (len(to_delete_ids) if to_delete_ids else 0)
-    deleted = 0
-    if to_delete_keys or to_delete_ids:
+    deleted = delete_and_track(conn, to_delete_keys)
+
+    inserted = 0
+    manual_errors = []
+
+    def _insert_manual_from_row(row):
+        detalle_man = (row.get("detalle") or "").strip()
+        monto_man = float(row.get("monto") or 0)
+        if not detalle_man or monto_man <= 0:
+            return False, "Completa 'Detalle' y un monto mayor a 0 en la fila manual."
+        fecha_man = row.get("fecha") or pd.Timestamp.today()
         try:
-            deleted = delete_transactions(conn, unique_keys=to_delete_keys or None, ids=to_delete_ids or None)
-        except Exception as e:
-            st.error(f"Error al eliminar filas: {e}")
-            deleted = 0
-
-        # Verificar que no queden remanentes en DB (post-delete)
-        remaining_after = 0
-        remaining_uks = []
-        remaining_ids = []
-
-        try:
-            if isinstance(conn, dict) and conn.get("pg"):
-                engine = conn["engine"]
-                with engine.connect() as cx:
-                    if to_delete_keys:
-                        _p = {}
-                        _ph = []
-                        for i, uk in enumerate(to_delete_keys):
-                            k = f"uk{i}"
-                            _p[k] = str(uk)
-                            _ph.append(f":{k}")
-                        qk = text(f"SELECT unique_key FROM movimientos WHERE unique_key IN ({', '.join(_ph)})")
-                        rem_k = cx.execute(qk, _p).fetchall()
-                        remaining_uks = [r[0] for r in rem_k]
-                        remaining_after += len(remaining_uks)
-                    if to_delete_ids:
-                        _p2 = {}
-                        _ph2 = []
-                        for i, _id in enumerate(to_delete_ids):
-                            k = f"id{i}"
-                            _p2[k] = int(_id)
-                            _ph2.append(f":{k}")
-                        qi = text(f"SELECT id FROM movimientos WHERE id IN ({', '.join(_ph2)})")
-                        rem_i = cx.execute(qi, _p2).fetchall()
-                        remaining_ids = [int(r[0]) for r in rem_i]
-                        remaining_after += len(remaining_ids)
-            else:
-                if to_delete_keys:
-                    placeholders = ",".join(["?"] * len(to_delete_keys))
-                    q = f"SELECT unique_key FROM movimientos WHERE unique_key IN ({placeholders})"
-                    rem_k = pd.read_sql_query(q, conn, params=to_delete_keys)
-                    remaining_uks = rem_k["unique_key"].astype(str).tolist()
-                    remaining_after += len(remaining_uks)
-                if to_delete_ids:
-                    placeholders = ",".join(["?"] * len(to_delete_ids))
-                    q = f"SELECT id FROM movimientos WHERE id IN ({placeholders})"
-                    rem_i = pd.read_sql_query(q, conn, params=to_delete_ids)
-                    remaining_ids = rem_i["id"].astype(int).tolist()
-                    remaining_after += len(remaining_ids)
-        except Exception as ve:
-            st.info(f"No se pudo verificar la eliminación: {ve}")
-
-        # Mensajería según resultado
-        if expected_to_delete > 0 and deleted == 0 and remaining_after > 0:
-            st.warning(f"⚠️ Se intentó eliminar {expected_to_delete} fila(s), pero la base reporta {remaining_after} restante(s).")
-            if remaining_uks:
-                st.caption("Unique keys aún presentes:")
-                st.code(", ".join(map(str, remaining_uks)), language=None)
-            if remaining_ids:
-                st.caption("IDs aún presentes:")
-                st.code(", ".join(map(str, remaining_ids)), language=None)
-        elif expected_to_delete > deleted:
-            st.info(f"Eliminadas {deleted} de {expected_to_delete} fila(s) solicitadas.")
+            fstr = pd.to_datetime(fecha_man).strftime("%Y-%m-%d")
+        except Exception:
+            fstr = pd.Timestamp.today().strftime("%Y-%m-%d")
+        detalle_norm_man = normalize_detalle_for_manual(detalle_man)
+        key_material = f"{fstr}|{float(monto_man):.2f}|{detalle_norm_man}"
+        uk = "m:" + hashlib.sha1(key_material.encode("utf-8")).hexdigest()[:16]
+        row_db = {
+            "unique_key": uk,
+            "fecha": fstr,
+            "detalle": detalle_man,
+            "detalle_norm": detalle_norm_man,
+            "monto": float(monto_man),
+            "monto_real": float(monto_man),
+            "categoria": row.get("categoria") or "Sin categoría",
+            "nota_usuario": row.get("nota_usuario") or "",
+            "es_gasto": True,
+            "es_transferencia_o_abono": False,
+        }
+        inserted_ok = False
+        if isinstance(conn, dict) and conn.get("pg"):
+            engine = conn["engine"]
+            with engine.begin() as cx:
+                cx.execute(
+                    text(
+                        """
+                        INSERT INTO movimientos (unique_key, fecha, detalle, detalle_norm, monto, categoria, nota_usuario, monto_real, es_gasto, es_transferencia_o_abono)
+                        VALUES (:unique_key, :fecha, :detalle, :detalle_norm, :monto, :categoria, :nota_usuario, :monto_real, :es_gasto, :es_transferencia_o_abono)
+                        ON CONFLICT (unique_key) DO NOTHING
+                        """
+                    ),
+                    row_db,
+                )
+                got = cx.execute(text("SELECT 1 FROM movimientos WHERE unique_key = :uk"), {"uk": uk}).fetchone()
+                inserted_ok = bool(got)
         else:
-            st.success(f"Eliminadas {deleted} fila(s).")
+            try:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO movimientos
+                        (unique_key, fecha, detalle, detalle_norm, monto, categoria, nota_usuario, monto_real, es_gasto, es_transferencia_o_abono)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        row_db["unique_key"],
+                        row_db["fecha"],
+                        row_db["detalle"],
+                        row_db["detalle_norm"],
+                        row_db["monto"],
+                        row_db["categoria"],
+                        row_db["nota_usuario"],
+                        row_db["monto_real"],
+                        int(bool(row_db["es_gasto"])),
+                        int(bool(row_db["es_transferencia_o_abono"])),
+                    ),
+                )
+                conn.commit()
+                inserted_ok = True
+            except Exception as e:
+                return False, f"Error SQLite: {e}"
+        return inserted_ok, ""
 
-        # Registrar tombstones para evitar reingesta futura de estas unique_keys
-        try:
-            if deleted > 0 and all_uks_to_tomb:
-                if isinstance(conn, dict) and conn.get("pg"):
-                    engine = conn["engine"]
-                    with engine.begin() as cx:
-                        for uk in all_uks_to_tomb:
-                            cx.execute(text("INSERT INTO movimientos_borrados (unique_key) VALUES (:uk) ON CONFLICT (unique_key) DO NOTHING"), {"uk": uk})
-                else:
-                    for uk in all_uks_to_tomb:
-                        try:
-                            conn.execute("INSERT OR IGNORE INTO movimientos_borrados (unique_key) VALUES (?)", (uk,))
-                        except Exception:
-                            pass
-                    conn.commit()
-                st.caption(f"(Marcadas {len(all_uks_to_tomb)} unique_key como tombstones)")
-        except Exception as _tbw:
-            st.caption(f"(No se pudieron registrar tombstones: {_tbw})")
+    if not manual_rows.empty:
+        for _, mrow in manual_rows.iterrows():
+            ok, err = _insert_manual_from_row(mrow)
+            if ok:
+                inserted += 1
+            elif err:
+                manual_errors.append(err)
+
+    messages = []
+    if updated:
+        messages.append(f"Actualizadas {updated} fila(s).")
+    if deleted:
+        messages.append(f"Eliminadas {deleted} fila(s).")
+    if inserted:
+        messages.append(f"Agregados {inserted} gasto(s) manual(es).")
+    if manual_errors:
+        for msg in manual_errors:
+            st.warning(msg)
+    if messages:
+        st.success(" ".join(messages))
     else:
-        st.success(f"Actualizadas {updated} filas. (No se detectaron eliminaciones)")
+        st.info("No hubo cambios para guardar.")
 
     st.rerun()
 
-if download_clicked:
-    st.download_button(
-        "Descargar CSV enriquecido",
-        data=editable.to_csv(index=False).encode("utf-8"),
-        file_name="movimientos_enriquecidos.csv",
-        mime="text/csv",
-    )
-
-## Eliminación ahora se maneja directamente quitando filas en la tabla (num_rows="dynamic")
-
-# === Agregar gasto manual (no reinsertable por CSV) ===
-with st.expander("➕ Agregar gasto manual"):
-    st.caption("Usa esto cuando pagaste por otros o quieres registrar solo tu parte real. El movimiento original puedes eliminarlo con la casilla **Eliminar**; al subir nuevos CSV no volverá por el tombstone. Este manual queda en la BD como gasto propio.")
-
-    colm1, colm2 = st.columns([1,1])
-    with colm1:
-        fecha_man = st.date_input("Fecha", value=pd.Timestamp.today().date())
-        detalle_man = st.text_input("Detalle", value="")
-        monto_man = st.number_input(
-            "Monto real (tu parte)",
-            min_value=0.0, step=1000.0, value=0.0,
-            help="Ingresa el monto que realmente te corresponde (positivo)"
-        )
-    with colm2:
-        cat_man = st.selectbox(
-            "Categoría", options=categories,
-            index=(categories.index("Sin categoría") if "Sin categoría" in categories else 0)
-        )
-        nota_man = st.text_input("Nota (opcional)", value="")
-
-    def _norm_text(s: str) -> str:
-        s = (s or "").strip()
-        s = unicodedata.normalize("NFKD", s)
-        s = "".join(ch for ch in s if not unicodedata.combining(ch))
-        s = s.replace("\n"," ").replace("\t"," ")
-        s = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in s)
-        return " ".join(s.upper().split())
-
-    if st.button("Agregar gasto manual", type="primary"):
-        if not detalle_man or monto_man <= 0:
-            st.warning("Completa **Detalle** y **Monto real** (mayor a 0).")
-        else:
-            try:
-                fstr = pd.to_datetime(fecha_man).strftime("%Y-%m-%d")
-                detalle_norm_man = _norm_text(detalle_man)
-                # Clave estable para manual: prefijo m: para distinguirla de cartolas
-                key_material = f"{fstr}|{float(monto_man):.2f}|{detalle_norm_man}"
-                uk = "m:" + hashlib.sha1(key_material.encode("utf-8")).hexdigest()[:16]
-
-                row = {
-                    "unique_key": uk,
-                    "fecha": fstr,
-                    "detalle": detalle_man,
-                    "detalle_norm": detalle_norm_man,
-                    # En la BD manejamos 'monto' visible/positivo para gastos
-                    "monto": float(monto_man),
-                    "monto_real": float(monto_man),
-                    "categoria": cat_man,
-                    "nota_usuario": nota_man,
-                    "es_gasto": True,
-                    "es_transferencia_o_abono": False,
-                }
-
-                inserted_ok = False
-                # Insertar evitando duplicados por unique_key
-                if isinstance(conn, dict) and conn.get("pg"):
-                    engine = conn["engine"]
-                    with engine.begin() as cx:
-                        cx.execute(text(
-                            """
-                            INSERT INTO movimientos (unique_key, fecha, detalle, detalle_norm, monto, categoria, nota_usuario, monto_real, es_gasto, es_transferencia_o_abono)
-                            VALUES (:unique_key, :fecha, :detalle, :detalle_norm, :monto, :categoria, :nota_usuario, :monto_real, :es_gasto, :es_transferencia_o_abono)
-                            ON CONFLICT (unique_key) DO NOTHING
-                            """
-                        ), row)
-                        # comprobar si quedó insertado
-                        got = cx.execute(text("SELECT 1 FROM movimientos WHERE unique_key = :uk"), {"uk": uk}).fetchone()
-                        inserted_ok = bool(got)
-                else:
-                    try:
-                        conn.execute(
-                            """
-                            INSERT OR IGNORE INTO movimientos
-                                (unique_key, fecha, detalle, detalle_norm, monto, categoria, nota_usuario, monto_real, es_gasto, es_transferencia_o_abono)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                            """,
-                            (
-                                row["unique_key"], row["fecha"], row["detalle"], row["detalle_norm"],
-                                row["monto"], row["categoria"], row["nota_usuario"], row["monto_real"],
-                                int(bool(row["es_gasto"])), int(bool(row["es_transferencia_o_abono"]))
-                            ),
-                        )
-                        conn.commit()
-                        inserted_ok = True
-                    except Exception as e:
-                        st.error(f"Error en inserción SQLite: {e}")
-                        inserted_ok = False
-
-                if inserted_ok:
-                    st.success("Gasto manual agregado ✅")
-                    st.rerun()
-                else:
-                    st.info("No se insertó (posible duplicado de unique_key). Modifica el detalle o monto e intenta de nuevo.")
-            except Exception as e:
-                st.error(f"No se pudo agregar el gasto manual: {e}")
+# Eliminación ahora se maneja directamente quitando filas en la tabla o usando la columna de acciones
 
 st.markdown("### Más análisis")
-df_month2 = df_plot.copy()
-df_month2["mes"] = df_month2["fecha"].dt.to_period("M").astype(str)
-amt_col = "monto" if "monto" in df_month2.columns else "monto_real_plot"
-mensual2 = df_month2.assign(_amt=np.abs(pd.to_numeric(df_month2[amt_col], errors="coerce").fillna(0))).groupby("mes")["_amt"].sum().reset_index().rename(columns={"_amt":"monto"})
-# Gráfico de tendencias mensuales mejorado
-chart_mensual = (
-    alt.Chart(mensual2)
-    .mark_line(
-        point={"size": 60},
-        stroke="#133c60",
-        strokeWidth=3,
+df_month2 = df_analysis.copy()
+if not df_month2.empty:
+    df_month2["mes"] = df_month2["fecha"].dt.to_period("M").astype(str)
+    amt_col = "monto" if "monto" in df_month2.columns else "monto_real"
+    mensual2 = (
+        df_month2.assign(_amt=np.abs(pd.to_numeric(df_month2[amt_col], errors="coerce").fillna(0)))
+        .groupby("mes")["_amt"]
+        .sum()
+        .reset_index()
+        .rename(columns={"_amt": "monto"})
+        .sort_values("mes")
     )
-    .encode(
-        x=alt.X("mes:N", title="Mes"),
-        y=alt.Y("monto:Q", title="Total de Gastos", axis=alt.Axis(format=",.0f")),
-        tooltip=[
-            alt.Tooltip("mes:N", title="Mes"),
-            alt.Tooltip("monto:Q", format=",.0f", title="Total")
-        ]
+    chart_mensual = (
+        alt.Chart(mensual2)
+        .mark_line(
+            point={"size": 60},
+            stroke="#133c60",
+            strokeWidth=3,
+        )
+        .encode(
+            x=alt.X("mes:N", title="Mes"),
+            y=alt.Y("monto:Q", title="Total de Gastos", axis=alt.Axis(format=",.0f")),
+            tooltip=[
+                alt.Tooltip("mes:N", title="Mes"),
+                alt.Tooltip("monto:Q", format=",.0f", title="Total")
+            ]
+        )
+        .properties(
+            height=250,
+            title={
+                "text": "Tendencia de Gastos Mensuales",
+                "fontSize": 16,
+                "fontWeight": "bold",
+                "color": "#133c60"
+            }
+        )
+        .configure_view(stroke=None)
+        .configure_axis(grid=False)
     )
-    .properties(
-        height=250,
-        title={
-            "text": "Tendencia de Gastos Mensuales",
-            "fontSize": 16,
-            "fontWeight": "bold",
-            "color": "#133c60"
-        }
-    )
-    .configure_view(stroke=None)
-    .configure_axis(grid=False)
-)
-st.altair_chart(chart_mensual, use_container_width=True)
+    st.altair_chart(chart_mensual, use_container_width=True)
+else:
+    st.info("Carga algunos movimientos para ver la tendencia mensual.")
 
 # === Proyección de gastos del mes (por categoría) ===
 st.markdown("### Proyección de gastos del mes")
