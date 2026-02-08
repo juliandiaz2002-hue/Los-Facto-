@@ -298,6 +298,26 @@ def _stable_sig_key(fecha_iso: str, detalle_norm: str, monto_abs_2d: float) -> s
     h = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
     return f"k:{h}"
 
+def compute_unique_keys_for_df(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Compute canonical unique_key for each row using the same algorithm as upsert.
+    Call this before tombstone filter to ensure keys match what's stored in DB.
+    Modifies df in place and returns it.
+    """
+    if df is None or df.empty:
+        return df
+    df = df.copy()
+    if "detalle_norm" not in df.columns:
+        df["detalle_norm"] = df.get("detalle", "")
+    df["detalle_norm"] = df["detalle_norm"].astype(str).map(_normalize_text_basic)
+    if "monto_cartola" not in df.columns:
+        df["monto_cartola"] = pd.to_numeric(df.get("monto", 0), errors="coerce").abs().round(2)
+    else:
+        df["monto_cartola"] = pd.to_numeric(df["monto_cartola"], errors="coerce").fillna(0).abs().round(2)
+    df["unique_key"] = df.apply(_compute_unique_key_row, axis=1)
+    return df
+
+
 def _compute_unique_key_row(row: pd.Series) -> str:
     # fecha normalizada (YYYY-MM-DD)
     try:
@@ -384,6 +404,11 @@ def upsert_transactions(conn, df: pd.DataFrame) -> Tuple[int, int]:
         "nota_usuario",
         "unique_key",
     ]
+    # Alias prep.py: fraccion_mia->fraccion_mia_sugerida, monto_mio->monto_mio_estimado
+    if "fraccion_mia" in df.columns and "fraccion_mia_sugerida" not in df.columns:
+        df["fraccion_mia_sugerida"] = df["fraccion_mia"]
+    if "monto_mio" in df.columns and "monto_mio_estimado" not in df.columns:
+        df["monto_mio_estimado"] = df["monto_mio"]
     for c in cols:
         if c not in df.columns:
             df[c] = None

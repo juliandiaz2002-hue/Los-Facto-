@@ -1,3 +1,4 @@
+import io
 import os
 import re
 import unicodedata
@@ -23,6 +24,7 @@ from db import (
     update_categoria_map_from_df,
     map_categories_for_df,
     rename_category,
+    compute_unique_keys_for_df,
 )
 
 st.set_page_config(page_title="Dashboard de Facto$", layout="wide")
@@ -297,29 +299,71 @@ MONTH_NAMES = {
     "09": "Septiembre", "10": "Octubre", "11": "Noviembre", "12": "Diciembre"
 }
 
+def _detect_encoding(raw_bytes: bytes) -> str:
+    """Detect encoding for CSV (supports Latin-1, UTF-8, Windows-1252)."""
+    try:
+        import chardet
+        result = chardet.detect(raw_bytes)
+        enc = (result.get("encoding") or "utf-8").lower()
+        if enc in ("utf-8", "utf-8-sig", "ascii", "iso-8859-1", "latin-1", "windows-1252", "cp1252"):
+            return enc
+    except Exception:
+        pass
+    return "utf-8"
+
+
 @st.cache_data(show_spinner=False)
 def load_df(file):
+    # Leer contenido (bancos usan Latin-1, UTF-8, CP1252)
+    raw = file.read() if hasattr(file, "read") else file
+    if isinstance(raw, str):
+        raw = raw.encode("utf-8", errors="replace")
+    enc = _detect_encoding(raw)
+    buf = io.BytesIO(raw)
     try:
-        # Auto-detect delimiter ("," or ";") using the Python engine
-        df = pd.read_csv(file, sep=None, engine="python")
+        df = pd.read_csv(buf, sep=None, engine="python", encoding=enc)
     except Exception:
-        # Fallback: reset file pointer and try default params
+        buf.seek(0)
         try:
-            file.seek(0)
+            df = pd.read_csv(buf, sep=None, engine="python", encoding="utf-8", on_bad_lines="skip")
         except Exception:
-            pass
-        df = pd.read_csv(file)
+            buf.seek(0)
+            df = pd.read_csv(buf)
     # Limpiar nombres de columnas (eliminar espacios, BOM y caracteres especiales)
-    df.columns = df.columns.str.strip()
-    # Remover BOM (Byte Order Mark) que puede estar al inicio de la primera columna
+    df.columns = df.columns.str.strip().str.lower()
     df.columns = df.columns.str.replace('\ufeff', '', regex=False)
+    # Aliases: compatibilidad con prep.py y formatos de banco
+    col_aliases = {
+        "glosa": "detalle", "descripcion": "detalle", "concepto": "detalle", "comercio": "detalle",
+        "cargo": "monto", "debe": "monto", "debito": "monto", "importe": "monto",
+        "fecha movimiento": "fecha", "date": "fecha", "fecha_mov": "fecha",
+        "fraccion_mia": "fraccion_mia_sugerida", "monto_mio": "monto_mio_estimado",
+    }
+    rename_map = {}
+    for old, new in col_aliases.items():
+        if old in df.columns and new not in df.columns:
+            rename_map[old] = new
+    df = df.rename(columns=rename_map)
+    # Si aún falta 'detalle', buscar por substring
+    if "detalle" not in df.columns:
+        for c in df.columns:
+            if any(k in c for k in ("detalle", "glosa", "descripcion", "concepto")):
+                df = df.rename(columns={c: "detalle"})
+                break
+    if "monto" not in df.columns:
+        for c in df.columns:
+            if any(k in c for k in ("monto", "importe", "cargo", "abono")):
+                df = df.rename(columns={c: "monto"})
+                break
 
     missing = REQUIRED_COLS - set(df.columns)
     if missing:
         st.error(f"Faltan columnas requeridas: {sorted(missing)}")
         st.stop()
     
-    df["fecha"] = pd.to_datetime(df.get("fecha"), errors="coerce")
+    # Fechas flexibles: DD/MM/YYYY, DD-MM-YYYY, YYYY-MM-DD, etc.
+    _fecha_raw = df.get("fecha")
+    df["fecha"] = pd.to_datetime(_fecha_raw, dayfirst=True, errors="coerce")
     
     def _clean_amount(x):
         if pd.isna(x):
@@ -338,7 +382,7 @@ def load_df(file):
         except Exception:
             return pd.to_numeric(s, errors="coerce")
     
-    for c in ["monto", "fraccion_mia_sugerida", "monto_mio_estimado", "monto_real"]:
+    for c in ["monto", "fraccion_mia_sugerida", "monto_mio_estimado", "monto_real", "fraccion_mia", "monto_mio"]:
         if c in df.columns:
             df[c] = df[c].apply(_clean_amount)
 
@@ -367,24 +411,8 @@ def load_df(file):
         if sc in df.columns:
             df[sc] = df[sc].astype(str).replace({"nan": "", "None": ""}).fillna("")
     
-    # Generar unique_key si falta (fecha|detalle_norm|monto_cartola); estable y no depende de ediciones
-    if "unique_key" not in df.columns:
-        def _uk_stable(row):
-            f = row.get("fecha")
-            d = row.get("detalle_norm") or ""
-            mc = row.get("monto_cartola")
-            # normalizar fecha a YYYY-MM-DD
-            try:
-                fstr = pd.to_datetime(f).strftime("%Y-%m-%d")
-            except Exception:
-                fstr = str(f)
-            # monto de cartola en float
-            try:
-                mc_val = float(mc)
-            except Exception:
-                mc_val = 0.0
-            return f"h:{hash((fstr, mc_val, d))}"
-        df["unique_key"] = df.apply(_uk_stable, axis=1)
+    # unique_key: NO generarlo aquí. Se calcula con compute_unique_keys_for_df() antes del tombstone
+    # y upsert para garantizar consistencia con la BD (hashlib determinístico, no Python hash())
     return df
 
 def build_suggestions_df(df, conn):
@@ -655,23 +683,8 @@ if uploaded is not None:
     df_in["es_transferencia_o_abono"] = df_in["es_transferencia_o_abono"].astype(bool)
     df_in["es_compartido_posible"] = df_in["es_compartido_posible"].astype(bool)
 
-    # Asegurar unique_key presente (si no vino en el CSV) usando monto_cartola
-    if "unique_key" not in df_in.columns:
-        def _uk_stable_ing(row):
-            f = row.get("fecha")
-            d = row.get("detalle_norm") or ""
-            mc = row.get("monto_cartola")
-            try:
-                fstr = pd.to_datetime(f).strftime("%Y-%m-%d")
-            except Exception:
-                fstr = str(f)
-            try:
-                mc_val = float(mc)
-            except Exception:
-                mc_val = 0.0
-            return f"h:{hash((fstr, mc_val, d))}"
-        df_in["unique_key"] = df_in.apply(_uk_stable_ing, axis=1)
-
+    # --- unique_key canónico (mismo algoritmo que la BD) para tombstone y upsert ---
+    df_in = compute_unique_keys_for_df(df_in)
 
     # --- Filtrar transacciones previamente borradas (tombstones) ---
     try:
