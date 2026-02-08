@@ -1241,9 +1241,9 @@ if not df_plot.empty:
             key="category_filter"
         )
         if selected_category != "Todas las categorías":
-        if st.button("✅ Aplicar filtro", key="apply_filter"):
-            st.session_state["filtered_category"] = selected_category
-            scroll_and_rerun()
+            if st.button("✅ Aplicar filtro", key="apply_filter"):
+                st.session_state["filtered_category"] = selected_category
+                scroll_and_rerun()
 
 # === Insights analíticos adicionales ===
 col_tl = st.container()
