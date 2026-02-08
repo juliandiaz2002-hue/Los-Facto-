@@ -31,6 +31,11 @@ st.set_page_config(page_title="Dashboard de Facto$", layout="wide")
 
 st.title("Dashboard de Facto$")
 
+def scroll_and_rerun(target_id: str | None = None):
+    if target_id:
+        st.session_state["scroll_target"] = target_id
+    st.rerun()
+
 _scroll_target = st.session_state.pop("scroll_target", None)
 if _scroll_target:
     st.markdown(
@@ -237,6 +242,13 @@ div[data-testid="stMetric"] [data-testid="stMetricDelta"]{
 [data-testid="stDataFrame"] input[type="checkbox"]:checked::before{
   content: "✅";
   color: #22c55e;
+}
+.suggest-card{
+  background: rgba(34,197,94,0.08);
+  border: 1px solid var(--facto-border);
+  border-radius: 12px;
+  padding: 0.6rem 0.9rem;
+  margin-bottom: 0.3rem;
 }
 
 /* Data editor / tables */
@@ -470,7 +482,67 @@ def load_df(file, date_format: str = "YYYY-MM-DD"):
     # y upsert para garantizar consistencia con la BD (hashlib determinístico, no Python hash())
     return df
 
-def build_suggestions_df(df, conn):
+def _suggest_by_name_amount(hist_df, detalle_norm, monto, top_k=3):
+    if hist_df is None or hist_df.empty:
+        return []
+    normalized = str(detalle_norm or "").strip().upper()
+    if not normalized:
+        return []
+    matches = hist_df[hist_df["detalle_norm_cmp"] == normalized]
+    if matches.empty and len(normalized) >= 4:
+        prefix = normalized[:4]
+        matches = hist_df[hist_df["detalle_norm_cmp"].str.contains(prefix, na=False)]
+    if matches.empty:
+        return []
+    try:
+        monto_val = abs(float(pd.to_numeric(monto, errors="coerce") or 0.0))
+    except Exception:
+        monto_val = 0.0
+    if monto_val > 0:
+        tol = max(monto_val * 0.25, 1000)
+        low, high = monto_val - tol, monto_val + tol
+        filtered = matches[
+            (pd.to_numeric(matches["monto"], errors="coerce").fillna(0).abs() >= low)
+            & (pd.to_numeric(matches["monto"], errors="coerce").fillna(0).abs() <= high)
+        ]
+        if not filtered.empty:
+            matches = filtered
+    counts = (
+        matches.groupby("categoria")
+        .size()
+        .sort_values(ascending=False)
+        .head(top_k)
+    )
+    total = counts.sum()
+    suggestions = []
+    for cat, cnt in counts.items():
+        suggestions.append({"categoria": cat, "score": float(cnt) / float(total or 1)})
+    return suggestions
+
+
+def apply_category_change(conn, df_reference, unique_key: str, new_category: str):
+    if not unique_key or not new_category:
+        return False
+    target = df_reference[df_reference["unique_key"] == unique_key]
+    if target.empty:
+        return False
+    row = target.iloc[0].copy()
+    row["categoria"] = new_category
+    edits_df = pd.DataFrame([row])
+    try:
+        updated = apply_edits(conn, edits_df)
+        if updated:
+            try:
+                update_categoria_map_from_df(conn, edits_df)
+            except Exception:
+                pass
+            return True
+    except Exception as _apply_e:
+        st.error(f"No se pudo aplicar la categoría: {_apply_e}")
+    return False
+
+
+def build_suggestions_df(df, conn, hist_df=None):
     """Construir DataFrame de sugerencias de categoría (optimizado, consultas en lote)."""
     # Filas sin categoría o "Sin categoría"
     mask = (df["categoria"].isna()) | (df["categoria"] == "") | (df["categoria"] == "Sin categoría")
@@ -640,7 +712,29 @@ def build_suggestions_df(df, conn):
                     "manual": "",
                 })
                 continue
-        # 3) Sin sugerencia
+        # 3) Similitud por nombre/monto
+        if hist_df is not None and not hist_df.empty:
+            sim_suggestions = _suggest_by_name_amount(
+                hist_df,
+                row.get("detalle_norm"),
+                row.get("monto"),
+            )
+            if sim_suggestions:
+                best = sim_suggestions[0]
+                results.append({
+                    "unique_key": row.get("unique_key", ""),
+                    "detalle": row.get("detalle", ""),
+                    "detalle_norm": dn,
+                    "sugerida": best["categoria"],
+                    "fuente": f"Nombres similares ({best['score']:.2f})",
+                    "confianza": best["score"],
+                    "aceptar": False,
+                    "manual": "",
+                    "alternativas_sim": sim_suggestions,
+                    "monto": row.get("monto"),
+                })
+                continue
+        # 4) Sin sugerencia
         results.append({
             "unique_key": row.get("unique_key", ""),
             "detalle": row.get("detalle", ""),
@@ -650,6 +744,8 @@ def build_suggestions_df(df, conn):
             "confianza": 0.0,
             "aceptar": False,
             "manual": "",
+            "alternativas_sim": [],
+            "monto": row.get("monto"),
         })
 
     return pd.DataFrame(results)
@@ -790,6 +886,13 @@ try:
             st.caption(f"🔁 Depurado: se eliminaron {dup_count} duplicados por unique_key al cargar la BD.")
 except Exception as _dedupe_e:
     st.caption(f"(No se pudo depurar duplicados: {_dedupe_e})")
+hist_similarity_df = df.copy()
+hist_similarity_df["detalle_norm_cmp"] = hist_similarity_df.get("detalle_norm", "").astype(str).str.strip().str.upper()
+hist_similarity_df = hist_similarity_df[
+    (hist_similarity_df["detalle_norm_cmp"] != "")
+    & hist_similarity_df["categoria"].notna()
+    & (hist_similarity_df["categoria"] != "Sin categoría")
+]
 
 if df.empty:
     st.info(
@@ -841,7 +944,7 @@ with st.sidebar:
         for lbl, val, keybtn in chips:
             if st.button(f"{lbl}: {val} ✕", key=f"sidenav_{keybtn}"):
                 st.session_state["pending_filter_reset"] = keybtn
-                st.rerun()
+                scroll_and_rerun()
     st.divider()
     with st.expander("Gestionar categorías"):
         st.caption("Puedes eliminar o agregar categorías. Se guardan en la base.")
@@ -878,7 +981,7 @@ with st.sidebar:
             categories = get_categories(conn)
             st.success(f"'{old_name}' → '{new_name.strip()}' actualizado")
             # Refrescar para recargar df desde la base y aplicar nombre nuevo en la tabla
-            st.rerun()
+            scroll_and_rerun()
 # --- Leer valores de filtros desde session_state para uso global ---
 q = st.session_state.get("search_q", "")
 sel_mes = st.session_state.get("month_filter", "Todos")
@@ -1138,9 +1241,9 @@ if not df_plot.empty:
             key="category_filter"
         )
         if selected_category != "Todas las categorías":
-            if st.button("✅ Aplicar filtro", key="apply_filter"):
-                st.session_state["filtered_category"] = selected_category
-                st.rerun()
+        if st.button("✅ Aplicar filtro", key="apply_filter"):
+            st.session_state["filtered_category"] = selected_category
+            scroll_and_rerun()
 
 # === Insights analíticos adicionales ===
 col_tl = st.container()
@@ -1197,7 +1300,7 @@ if "filtered_category" in st.session_state and st.session_state["filtered_catego
     # Botón para limpiar filtro
     if st.button("❌ Limpiar filtro", key="clear_filter"):
         del st.session_state["filtered_category"]
-        st.rerun()
+        scroll_and_rerun()
     
     st.markdown("---")
 
@@ -1437,94 +1540,57 @@ if sel_mes and sel_mes != "Todos" and not df_base_compare.empty:
         st.warning(f"No se pudo generar la comparación: {e}")
 
 
-# Sugerencias de categoría
-title_sug = "### Sugerencias de categoría"
-if MOBILE:
-    with st.expander("Sugerencias de categoría (toca para ver)"):
-        st.markdown(title_sug)
-        # el resto de la sección continúa igual
+st.markdown('<div id="suggestions-panel"></div>', unsafe_allow_html=True)
+suggestions_df = build_suggestions_df(dfv, conn, hist_df=hist_similarity_df)
+rejecting_key = st.session_state.get("rejecting_key")
+
+if suggestions_df.empty:
+    st.info("No hay transacciones pendientes de categorizar.")
 else:
-    st.markdown(title_sug)
-# Guard flag para auto-aplicación de sugerencias de alta confianza
-if "auto_apply_suggestions_done" not in st.session_state:
-    st.session_state["auto_apply_suggestions_done"] = False
-suggestions_df = build_suggestions_df(dfv, conn)
-
-# Auto-aplicar sugerencias de alta confianza (>= 0.9) una sola vez por sesión
-if (not st.session_state["auto_apply_suggestions_done"]) and (not suggestions_df.empty):
-    high_conf = suggestions_df[suggestions_df["confianza"] >= 0.9].copy()
-    if not high_conf.empty:
-        edits_df = pd.DataFrame()
-        for _, row in high_conf.iterrows():
-            original_row = dfv[dfv["unique_key"] == row["unique_key"]]
-            if not original_row.empty:
-                edit_row = original_row.iloc[0].copy()
-                edit_row["categoria"] = row["sugerida"]
-                edits_df = pd.concat([edits_df, pd.DataFrame([edit_row])], ignore_index=True)
-        if not edits_df.empty:
-            updated = apply_edits(conn, edits_df)
+    st.markdown("### Sugerencias de categoría")
+    st.caption(f"{len(suggestions_df)} movimientos necesitan categoría. Acepta o ajusta cada sugerencia.")
+    for _, row in suggestions_df.iterrows():
+        uk = str(row.get("unique_key", ""))
+        monto_txt = ""
+        if "monto" in row and row["monto"] not in (None, ""):
             try:
-                learned = update_categoria_map_from_df(conn, edits_df)
-                if learned:
-                    st.caption(f"Aprendidas {learned} reglas nuevas por 'detalle_norm'.")
+                monto_txt = f"${float(row['monto']):,.0f}"
             except Exception:
-                pass
-            st.success(f"Aplicadas automáticamente {updated} sugerencias de categoría (confianza ≥ 0.9).")
-            st.session_state["auto_apply_suggestions_done"] = True
-            st.rerun()
+                monto_txt = str(row.get("monto"))
+        with st.container():
+            st.markdown(f"<div class='suggest-card'>**{row['detalle']}**</div>", unsafe_allow_html=True)
+            st.caption(f"Normalizado: {row['detalle_norm']} · Monto: {monto_txt or 's/d'}")
+            st.markdown(f"**Propuesta:** :blue[{row['sugerida']}]")
+            st.caption(f"Fuente: {row['fuente']} (confianza {row['confianza']:.2f})")
+            if isinstance(row.get("alternativas_sim"), list) and row["alternativas_sim"]:
+                chips = " ".join([f"`{alt['categoria']}` ({alt['score']:.2f})" for alt in row["alternativas_sim"]])
+                st.caption(f"Coincidencias similares: {chips}")
+            col_a, col_b = st.columns(2)
+            with col_a:
+                if st.button("Aceptar", key=f"accept_{uk}"):
+                    if apply_category_change(conn, df, uk, row["sugerida"]):
+                        st.success("Categoría aplicada.")
+                        st.session_state.pop("rejecting_key", None)
+                        scroll_and_rerun("suggestions-panel")
+            with col_b:
+                if st.button("Rechazar", key=f"reject_{uk}"):
+                    st.session_state["rejecting_key"] = uk
+                    scroll_and_rerun("suggestions-panel")
 
-if not suggestions_df.empty:
-    st.caption(f"Se encontraron {len(suggestions_df)} transacciones sin categoría. Revisa las sugerencias:")
-    
-    # UI de revisión de sugerencias
-    with st.form("suggestions_form"):
-        # Crear columnas para cada sugerencia
-        for idx, row in suggestions_df.iterrows():
-            col1, col2, col3, col4 = st.columns([3, 2, 1, 2])
-            with col1:
-                st.write(f"**{row['detalle']}**")
-                st.caption(f"Normalizado: {row['detalle_norm']}")
-            with col2:
-                st.write(f"Sugerida: **{row['sugerida']}**")
-                st.caption(f"Fuente: {row['fuente']} (confianza: {row['confianza']:.1f})")
-            with col3:
-                accept = st.checkbox("Aceptar", key=f"accept_{idx}")
-                suggestions_df.loc[idx, "aceptar"] = accept
-            with col4:
-                manual_cat = st.selectbox("Manual", options=categories, key=f"manual_{idx}")
-                if manual_cat != "Sin categoría":
-                    suggestions_df.loc[idx, "manual"] = manual_cat
-        
-        apply_selected = st.form_submit_button("Aplicar seleccionadas")
-        if apply_selected:
-            to_apply = suggestions_df.copy()
-            
-            # Filtrar solo las aceptadas
-            accepted = to_apply[to_apply["aceptar"] == True].copy()
-            
-            if not accepted.empty:
-                # Crear DataFrame para aplicar cambios
-                edits_df = pd.DataFrame()
-                for _, row in accepted.iterrows():
-                    # Buscar la fila original en dfv
-                    original_row = dfv[dfv["unique_key"] == row["unique_key"]]
-                    if not original_row.empty:
-                        edit_row = original_row.iloc[0].copy()
-                        # Usar categoría manual si se especificó, sino la sugerida
-                        edit_row["categoria"] = row["manual"] if row["manual"] else row["sugerida"]
-                        edits_df = pd.concat([edits_df, pd.DataFrame([edit_row])], ignore_index=True)
-                
-                if not edits_df.empty:
-                    # Aplicar cambios
-                    updated = apply_edits(conn, edits_df)
-                    try:
-                        learned = update_categoria_map_from_df(conn, edits_df)
-                        if learned:
-                            st.info(f"Aprendidas {learned} reglas de categoría por 'detalle_norm'. Se aplicarán en futuras cargas.")
-                    except Exception:
-                        pass
-                    st.success(f"Aplicadas {updated} sugerencias de categoría.")
-                    st.rerun()
+        if st.session_state.get("rejecting_key") == uk:
+            manual_cat = st.selectbox(
+                "Selecciona la categoría correcta",
+                options=categories,
+                key=f"manual_select_{uk}",
+            )
+            if st.button("Guardar categoría manual", key=f"manual_save_{uk}"):
+                if manual_cat == "Sin categoría":
+                    st.warning("Elige una categoría distinta a 'Sin categoría'.")
+                else:
+                    if apply_category_change(conn, df, uk, manual_cat):
+                        st.success("Categoría manual aplicada.")
+                        st.session_state.pop("rejecting_key", None)
+                        scroll_and_rerun("suggestions-panel")
 
 st.markdown("### Tabla editable")
 st.markdown('<div id="tabla-movimientos"></div>', unsafe_allow_html=True)
@@ -1644,8 +1710,7 @@ if manual_submit:
     ok, msg = insert_manual_transaction(conn, manual_fecha, manual_detalle, manual_monto, manual_categoria, manual_nota)
     if ok:
         st.success("Gasto manual agregado.")
-        st.session_state["scroll_target"] = "manual-form"
-        st.rerun()
+        scroll_and_rerun("manual-form")
     else:
         st.warning(msg or "No se pudo agregar el gasto manual.")
 
@@ -1844,13 +1909,12 @@ except Exception:
     delete_requests = []
 
 if delete_requests:
-    st.session_state["scroll_target"] = "tabla-movimientos"
     deleted = delete_and_track(conn, delete_requests)
     if deleted:
         st.success(f"Eliminadas {deleted} transacción(es).")
     else:
         st.info("No se pudo eliminar la selección.")
-    st.rerun()
+    scroll_and_rerun("tabla-movimientos")
     
 if save_clicked:
     editable_clean = editable.drop(columns=["eliminar"], errors="ignore").copy()
@@ -1882,7 +1946,7 @@ if save_clicked:
     else:
         st.info("No hubo cambios para guardar.")
 
-    st.rerun()
+    scroll_and_rerun("tabla-movimientos")
 
 # Eliminación ahora se maneja directamente quitando filas en la tabla o marcando el checkbox
 
@@ -2047,7 +2111,7 @@ if st.button("Reparar montos"):
             conn.commit()
         
         st.success(f"Reparados {updated_count} montos discrepantes.")
-        st.rerun()
+        scroll_and_rerun()
     except Exception as e:
         st.error(f"Error al reparar montos: {e}")
 
@@ -2177,13 +2241,13 @@ with st.expander("Movimientos ignorados"):
                     sub = ignored_df[ignored_df["id"].astype("Int64").isin(sel_ids)]
                     restored = _restore_rows(sub)
                     st.success(f"Reincorporados {restored} movimientos.")
-                    st.rerun()
+                    scroll_and_rerun()
 
             with col_restore_all:
                 if st.button("Reincorporar TODOS"):
                     restored = _restore_rows(ignored_df)
                     st.success(f"Reincorporados {restored} movimientos.")
-                    st.rerun()
+                    scroll_and_rerun()
 
             with col_clear:
                 if st.button("Vaciar lista de ignorados"):
@@ -2196,7 +2260,7 @@ with st.expander("Movimientos ignorados"):
                             conn.execute("DELETE FROM movimientos_ignorados")
                             conn.commit()
                         st.success("Lista de ignorados vaciada.")
-                        st.rerun()
+                        scroll_and_rerun()
                     except Exception as e:
                         st.error(f"Error al limpiar ignorados: {e}")
         else:
@@ -2279,7 +2343,7 @@ with st.expander("🔎 Diagnóstico de Base de Datos"):
                         conn.execute("DELETE FROM movimientos")
                         conn.commit()
                     st.success("Tabla 'movimientos' vaciada. Sube tu CSV nuevamente.")
-                    st.rerun()
+                    scroll_and_rerun()
                 except Exception as e:
                     st.error(f"No se pudo vaciar movimientos: {e}")
         with coly:
@@ -2292,7 +2356,7 @@ with st.expander("🔎 Diagnóstico de Base de Datos"):
                         conn.execute("DELETE FROM movimientos_ignorados")
                         conn.commit()
                     st.success("Tabla 'movimientos_ignorados' vaciada.")
-                    st.rerun()
+                    scroll_and_rerun()
                 except Exception as e:
                     st.error(f"No se pudo vaciar ignorados: {e}")
 
