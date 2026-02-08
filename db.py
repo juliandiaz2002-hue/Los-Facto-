@@ -233,8 +233,13 @@ def update_categoria_map_from_df(conn, df: pd.DataFrame) -> int:
 
 
 def map_categories_for_df(conn, df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty or "detalle_norm" not in df.columns:
+    if df is None or df.empty:
         return df
+    df = df.copy()
+    if "detalle_norm" not in df.columns:
+        df["detalle_norm"] = df.get("detalle", "")
+    # Normalizar a formato BD (lowercase) para que el merge con categoria_map funcione
+    df["detalle_norm"] = df["detalle_norm"].astype(str).map(_normalize_text_basic)
     if isinstance(conn, dict) and conn.get("pg"):
         engine = conn["engine"]
         mp = pd.read_sql_query("SELECT detalle_norm, categoria FROM categoria_map", engine)
@@ -243,16 +248,18 @@ def map_categories_for_df(conn, df: pd.DataFrame) -> pd.DataFrame:
     if mp.empty:
         return df
     merged = df.merge(mp, on="detalle_norm", how="left", suffixes=(None, "_map"))
-    # Completar solo si falta o está vacío
-    if "categoria" not in merged.columns:
-        merged["categoria"] = merged["categoria_map"]
-    else:
-        merged["categoria"] = np.where(
-            merged["categoria"].isna() | (merged["categoria"].str.strip() == ""),
-            merged["categoria_map"],
-            merged["categoria"],
-        )
-    merged = merged.drop(columns=[c for c in ["categoria_map"] if c in merged.columns])
+    # Tras el merge: si df no tenía "categoria", solo existe "categoria" (de mp). Si df tenía "categoria",
+    # existe "categoria" y "categoria_map" (de mp). Solo usar categoria_map cuando exista.
+    if "categoria_map" in merged.columns:
+        left_cat = merged.get("categoria", pd.Series(dtype=object))
+        mask_empty = left_cat.isna() | (left_cat.astype(str).str.strip().isin(["", "nan", "None"]))
+        merged["categoria"] = np.where(mask_empty, merged["categoria_map"], left_cat)
+        merged = merged.drop(columns=["categoria_map"])
+    elif "categoria" not in merged.columns:
+        merged["categoria"] = np.nan
+    # Filas sin match: rellenar con "Sin categoría"
+    merged["categoria"] = merged["categoria"].fillna("Sin categoría")
+    merged["categoria"] = merged["categoria"].replace("", "Sin categoría")
     return merged
 
 

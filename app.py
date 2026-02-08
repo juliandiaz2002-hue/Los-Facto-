@@ -637,7 +637,9 @@ if not categories:
     categories = DEFAULT_CATEGORIES[:]
 
 uploaded = st.file_uploader(
-    "Sube tu CSV estandarizado (movimientos_estandarizados_*.csv)", type=["csv"]
+    "Sube tu CSV (fecha, detalle, monto — o columnas equivalentes: glosa, cargo, etc.)",
+    type=["csv"],
+    help="Acepta CSV con columnas: fecha/detalle/monto, o glosa/descripcion/cargo/importe. Detección automática de encoding y delimitador.",
 )
 
 if uploaded is not None:
